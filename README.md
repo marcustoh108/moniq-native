@@ -40,6 +40,22 @@ this project pushed to a GitHub repo, entirely from its web dashboard (usable fr
 It still needs your Apple Developer and Google Play accounts connected, since only you can authorize
 those, but it removes the need to own a Mac or run Android Studio locally.
 
+A `codemagic.yaml` is already checked into this repo with three workflows:
+- **`android-debug`** — builds an unsigned, sideloadable APK. No accounts needed; use this first to
+  confirm the project builds and to test on your own Android phone.
+- **`android-release`** — builds a signed `.aab` for Google Play. Needs a keystore uploaded in
+  Codemagic's dashboard (Team settings → Code signing identities → Android) named
+  `moniq_android_keystore` — Codemagic can generate one for you if you don't have one.
+- **`ios-release`** — builds a signed `.ipa`. Needs an Apple Developer Program account and an App
+  Store Connect API key connected under Team settings → Integrations → Apple Developer Portal, named
+  `codemagic`.
+
+Full step-by-step instructions (what to name each keystore/integration, and how to turn on automatic
+Play Store / TestFlight upload once you're ready) are commented directly above each workflow in
+`codemagic.yaml`. To use it: sign up at codemagic.io, connect this GitHub repo, and Codemagic will
+detect `codemagic.yaml` automatically — no dashboard configuration needed beyond the signing setup
+above. Start with `android-debug`, since it needs nothing but the repo itself.
+
 ## Local commands (if using a computer)
 ```
 npm install

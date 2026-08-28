@@ -340,6 +340,26 @@ function cancelSubscription(){
   STATE.subscription.canceledAt = Date.now();
   persist();
 }
+// The stored status stays 'trial' until the user acts on it — this derives the *effective* status,
+// treating a trial past its end date as expired without mutating what's saved.
+function effectiveSubscriptionStatus(){
+  const sub = STATE.subscription;
+  if(sub.status === 'trial' && Date.now() >= sub.trialEndsAt) return 'expired';
+  return sub.status;
+}
+// Gates access to paid features. Client-side only — enforced against the local state machine above,
+// same as the rest of this app's billing. It stops honest users from using paid features without
+// subscribing; it is not a substitute for server-side receipt validation against a determined bypass
+// (e.g. someone editing localStorage directly), which would need a backend (Stripe webhooks and/or
+// StoreKit/Play Billing receipt checks) to close.
+function isEntitled(){
+  const s = effectiveSubscriptionStatus();
+  return s === 'trial' || s === 'active';
+}
+// Tabs that require an active trial or subscription. Intro/Demo (so people can see the app before
+// paying), the billing tabs themselves (Trial/Pricing/Checkout/Settings), and the legal pages stay
+// open regardless of subscription status.
+const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data']);
 // Combine an imported dataset into the current one without deleting anything on either side.
 // Used for household "shared access": each person exports their log, the other imports with Merge.
 function mergeState(remote){
@@ -1022,14 +1042,16 @@ function renderTabs(){
     ['settings','Settings'],
     ['data','Data'],
   ];
+  const locked = !isEntitled();
   return `<div class="tabs">
-    ${tabs.map(([k,l]) => `<button class="tab-btn ${ui.tab===k?'active':''}" data-tab="${k}">${l}</button>`).join('')}
+    ${tabs.map(([k,l]) => `<button class="tab-btn ${ui.tab===k?'active':''}" data-tab="${k}">${locked && GATED_TABS.has(k) ? '🔒 ' : ''}${l}</button>`).join('')}
   </div>`;
 }
 
 function renderTabContent(){
   if(ui.tab === 'intro') return renderIntro();
   if(ui.tab === 'demo') return renderDemo();
+  if(GATED_TABS.has(ui.tab) && !isEntitled()) return renderPaywall();
   if(ui.tab === 'overview') return renderOverview();
   if(ui.tab === 'add') return renderAdd();
   if(ui.tab === 'transactions') return renderTransactions();
@@ -1046,6 +1068,29 @@ function renderTabContent(){
   if(ui.tab === 'terms') return renderTerms();
   if(ui.tab === 'privacy') return renderPrivacy();
   return '';
+}
+
+const GATED_TAB_LABELS = {
+  add: 'Add Entry', overview: 'Overview', transactions: 'Transactions', categories: 'Categories',
+  bills: 'Bills', networth: 'Net Worth', reports: 'Reports', account: 'Sharing', data: 'Data',
+};
+function renderPaywall(){
+  const label = GATED_TAB_LABELS[ui.tab] || 'This feature';
+  const status = effectiveSubscriptionStatus();
+  const heading = status === 'expired' ? 'Your Free Trial Has Ended'
+    : (status === 'canceled_trial' || status === 'canceled') ? 'Your Subscription Has Ended'
+    : 'Start Your Free Trial';
+  const body = status === 'expired' ? `Your 7-day trial is over. Subscribe to keep using ${label} and the rest of MonIQ.`
+    : (status === 'canceled_trial' || status === 'canceled') ? `${label} — like the rest of MonIQ — needs an active subscription. Start a new one any time.`
+    : `${label} is part of MonIQ. Start a 7-day free trial to unlock it — cancel any time and you won't be charged.`;
+  return `
+  <div class="card" style="text-align:center; padding:44px 28px;">
+    <div style="font-size:30px;">🔒</div>
+    <div style="font-family:'Cormorant Garamond', serif; font-size:26px; color:var(--gold-bright); font-weight:700; margin-top:10px;">${heading}</div>
+    <div class="small-note" style="margin:16px 0 24px; max-width:420px; margin-left:auto; margin-right:auto; line-height:1.6;">${body}</div>
+    <button class="btn-primary" id="paywallStartTrialBtn">${status === 'none' ? 'Start Free Trial' : 'View Plans'}</button>
+    <div style="margin-top:16px;"><button class="pill-btn" id="paywallSeeDemoBtn">See It In Action First</button></div>
+  </div>`;
 }
 
 /* ============================= OVERVIEW TAB ============================= */
@@ -1913,16 +1958,20 @@ function renderAccountHouseholdDashboard(){
 /* ============================= SETTINGS TAB ============================= */
 function renderSubscriptionStatusBlock(){
   const sub = STATE.subscription;
-  if(sub.status === 'trial'){
+  const status = effectiveSubscriptionStatus();
+  if(status === 'trial'){
     const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
     return `<div class="stat-row"><div class="stat"><div class="v">Free Trial</div><div class="l">${daysLeft} Day${daysLeft===1?'':'s'} Left</div></div><div class="stat"><div class="v">${sub.plan==='annual'?'S$100.90/yr':'S$9.90/mo'}</div><div class="l">After Trial</div></div></div>
     <button class="pill-btn danger" id="settingsCancelTrialBtn" style="margin-top:12px;">Cancel Trial</button>`;
   }
-  if(sub.status === 'active'){
+  if(status === 'active'){
     return `<div class="stat-row"><div class="stat pos"><div class="v">Subscribed</div><div class="l">${sub.plan==='annual'?'Annual Plan':'Monthly Plan'}</div></div></div>
     <button class="pill-btn danger" id="settingsCancelSubBtn" style="margin-top:12px;">Cancel Subscription</button>`;
   }
-  if(sub.status === 'canceled_trial' || sub.status === 'canceled'){
+  if(status === 'expired'){
+    return `<div class="small-note">Your free trial ended. The rest of MonIQ is locked until you subscribe. <a href="#" data-action="goToTab" data-tab="pricing" style="color:var(--gold-bright); text-decoration:underline;">View plans</a>.</div>`;
+  }
+  if(status === 'canceled_trial' || status === 'canceled'){
     return `<div class="small-note">No active subscription (previously canceled). <a href="#" data-action="goToTab" data-tab="trial" style="color:var(--gold-bright); text-decoration:underline;">Start a new trial</a>.</div>`;
   }
   return `<div class="small-note">No active subscription. <a href="#" data-action="goToTab" data-tab="trial" style="color:var(--gold-bright); text-decoration:underline;">Start your free trial</a>.</div>`;
@@ -2063,9 +2112,10 @@ function renderCheckout(){
   const plan = ui.selectedPlan || 'annual';
   const price = plan === 'annual' ? 'S$100.90/year' : 'S$9.90/month';
   const sub = STATE.subscription;
+  const status = effectiveSubscriptionStatus();
   const stripeLink = STATE.settings.stripeLinks ? STATE.settings.stripeLinks[plan] : '';
 
-  if(sub.status === 'trial'){
+  if(status === 'trial'){
     const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
@@ -2075,7 +2125,7 @@ function renderCheckout(){
       <button class="pill-btn danger" id="cancelTrialBtn">Cancel Trial</button>
     </div>`;
   }
-  if(sub.status === 'active'){
+  if(status === 'active'){
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
       <h2>You're Subscribed</h2>
@@ -2291,6 +2341,13 @@ function attachGlobalHandlers(){
       }
     });
   });
+
+  if(GATED_TABS.has(ui.tab) && !isEntitled()){
+    const startTrialBtn = document.getElementById('paywallStartTrialBtn');
+    if(startTrialBtn) startTrialBtn.addEventListener('click', () => { ui.tab = effectiveSubscriptionStatus() === 'none' ? 'trial' : 'pricing'; render(); });
+    const seeDemoBtn = document.getElementById('paywallSeeDemoBtn');
+    if(seeDemoBtn) seeDemoBtn.addEventListener('click', () => { ui.tab = 'demo'; render(); });
+  }
 
   if(ui.tab === 'intro'){
     const getStartedBtn = document.getElementById('introGetStartedBtn');

@@ -1,0 +1,139 @@
+workflows:
+  # ---------------------------------------------------------------------------
+  # Android — debug build. No signing/accounts needed. Produces a sideloadable
+  # APK so you can test the app on your own phone before Google Play is set up.
+  # Run manually from the Codemagic dashboard (Start new build).
+  # ---------------------------------------------------------------------------
+  android-debug:
+    name: MonIQ Android (Debug / sideload)
+    max_build_duration: 30
+    instance_type: linux_x2
+    environment:
+      node: 20.18.1
+    scripts:
+      - name: Install npm dependencies
+        script: npm ci
+      - name: Sync Capacitor Android project
+        script: npx cap sync android
+      - name: Build debug APK
+        script: |
+          cd android
+          ./gradlew assembleDebug
+    artifacts:
+      - android/app/build/outputs/**/*.apk
+
+  # ---------------------------------------------------------------------------
+  # Android — signed release build (.aab) for Google Play.
+  #
+  # One-time setup in the Codemagic dashboard before this workflow will work:
+  #   1. Team settings -> Code signing identities -> Android -> upload a
+  #      keystore (or let Codemagic generate one for you). Name the reference
+  #      "moniq_android_keystore" — or change ANDROID_SIGNING_REFERENCE below
+  #      to match whatever you named it.
+  #   2. (Optional, for automatic Play Store upload) Play Console -> Setup ->
+  #      API access -> create a service account, grant it release access,
+  #      download its JSON key. In Codemagic: Team settings -> Environment
+  #      variable groups -> create a group named "google_play" containing
+  #      GCLOUD_SERVICE_ACCOUNT_CREDENTIALS (paste the JSON as the value).
+  #      Then uncomment the `google_play` group and `publishing` block below.
+  # ---------------------------------------------------------------------------
+  android-release:
+    name: MonIQ Android (Release)
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      android_signing:
+        - moniq_android_keystore
+      # groups:
+      #   - google_play
+      node: 20.18.1
+    scripts:
+      - name: Install npm dependencies
+        script: npm ci
+      - name: Sync Capacitor Android project
+        script: npx cap sync android
+      - name: Build signed release AAB
+        script: |
+          cd android
+          ./gradlew bundleRelease
+    artifacts:
+      - android/app/build/outputs/**/*.aab
+      - android/app/build/outputs/**/mapping.txt
+    publishing:
+      email:
+        recipients:
+          - marcus.toh@gmail.com
+      # google_play:
+      #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+      #   track: internal
+      #   submit_as_draft: true
+
+  # ---------------------------------------------------------------------------
+  # iOS — signed release build (.ipa), Apple Developer Program required.
+  #
+  # One-time setup in the Codemagic dashboard before this workflow will work:
+  #   1. Apple Developer Program enrollment ($99/yr) must already exist.
+  #   2. Team settings -> Integrations -> Apple Developer Portal -> connect
+  #      using an App Store Connect API key (App Store Connect -> Users and
+  #      Access -> Keys -> generate one, role "App Manager" or higher). Name
+  #      the integration "codemagic" — or change APP_STORE_CONNECT_INTEGRATION
+  #      below to match whatever you named it.
+  #   3. In App Store Connect, create the app record with bundle ID
+  #      com.avencia.moniq before the first build (Codemagic can create the
+  #      matching provisioning profile automatically, but not the app record).
+  #   4. (Optional, for automatic TestFlight upload) uncomment the
+  #      `app_store_connect` publishing block below.
+  # ---------------------------------------------------------------------------
+  ios-release:
+    name: MonIQ iOS (Release)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.avencia.moniq
+      node: 20.18.1
+      xcode: latest
+      cocoapods: default
+      vars:
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+    scripts:
+      - name: Install npm dependencies
+        script: npm ci
+      - name: Sync Capacitor iOS project
+        script: npx cap sync ios
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios/App
+          pod install
+      - name: Set up keychain to be used for codesigning
+        script: keychain initialize
+      - name: Fetch signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+        env:
+          BUNDLE_ID: com.avencia.moniq
+      - name: Add certificates to keychain
+        script: keychain add-certificates
+      - name: Set up code signing settings on Xcode project
+        script: xcode-project use-profiles
+      - name: Build ipa for distribution
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      email:
+        recipients:
+          - marcus.toh@gmail.com
+      # app_store_connect:
+      #   auth: integration
+      #   submit_to_testflight: true
