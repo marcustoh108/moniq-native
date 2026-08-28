@@ -294,7 +294,7 @@ function defaultState(){
     transactions: [], // {id, date, type, categoryId, categoryName, amount, currency, baseAmount, member, note, createdAt}
     bills: [], // {id, name, amount, dueDay, categoryId, notes, lastPaidMonth}
     netWorth: { accounts: [], history: [] }, // accounts: {id,name,type:'asset'|'liability',balance}; history: {id,date,totalAssets,totalLiabilities,netWorth}
-    settings: { baseCurrency: 'SGD', currencies: clone(DEFAULT_CURRENCIES), stripeLinks: { monthly: '', annual: '' } },
+    settings: { baseCurrency: 'SGD', currencies: clone(DEFAULT_CURRENCIES), stripeLinks: { monthly: '', annual: '' }, revenueCat: { iosApiKey: '', androidApiKey: '' } },
     household: { members: [{id:'me', name:'Me'}] },
     subscription: { status: 'none', plan: null, trialEndsAt: null, canceledAt: null }, // status: none | trial | active | canceled_trial | canceled
   };
@@ -309,6 +309,7 @@ function migrateState(){
   if(!STATE.settings.currencies) STATE.settings.currencies = clone(DEFAULT_CURRENCIES);
   if(!STATE.settings.baseCurrency) STATE.settings.baseCurrency = 'SGD';
   if(!STATE.settings.stripeLinks) STATE.settings.stripeLinks = { monthly: '', annual: '' };
+  if(!STATE.settings.revenueCat) STATE.settings.revenueCat = { iosApiKey: '', androidApiKey: '' };
   if(!STATE.household) STATE.household = { members: [{id:'me', name:'Me'}] };
   if(!STATE.household.members || !STATE.household.members.length) STATE.household.members = [{id:'me', name:'Me'}];
   if(!STATE.subscription) STATE.subscription = { status: 'none', plan: null, trialEndsAt: null, canceledAt: null };
@@ -347,12 +348,14 @@ function effectiveSubscriptionStatus(){
   if(sub.status === 'trial' && Date.now() >= sub.trialEndsAt) return 'expired';
   return sub.status;
 }
-// Gates access to paid features. Client-side only — enforced against the local state machine above,
-// same as the rest of this app's billing. It stops honest users from using paid features without
-// subscribing; it is not a substitute for server-side receipt validation against a determined bypass
-// (e.g. someone editing localStorage directly), which would need a backend (Stripe webhooks and/or
-// StoreKit/Play Billing receipt checks) to close.
+// Gates access to paid features. On native iOS/Android with RevenueCat configured (see the RC module
+// below), this reflects a real entitlement checked against Apple/Google + RevenueCat's servers — it
+// cannot be spoofed by editing localStorage. Everywhere else (web/PWA, or a native app that hasn't
+// connected RevenueCat yet) it falls back to the local trial/subscription state machine above, same
+// as before: enough to stop honest users from using paid features for free, not a substitute for
+// server-side verification.
 function isEntitled(){
+  if(rc.configured) return !!rc.entitled;
   const s = effectiveSubscriptionStatus();
   return s === 'trial' || s === 'active';
 }
@@ -360,6 +363,81 @@ function isEntitled(){
 // paying), the billing tabs themselves (Trial/Pricing/Checkout/Settings), and the legal pages stay
 // open regardless of subscription status.
 const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data']);
+
+/* ============================= REVENUECAT (native purchases) =============================
+   RevenueCat wraps StoreKit (iOS) / Play Billing (Android) and validates receipts against its own
+   servers, so the entitlement it reports can't be forged by editing local app data — unlike the
+   trial/subscription state machine above. It only runs inside the native app shell; the web/PWA
+   version keeps using Stripe Payment Links + the local state machine, since RevenueCat's mobile SDK
+   has nothing to plug into on a plain website.
+   One-time setup (see README): create a RevenueCat account, add your iOS/Android apps once their
+   App Store Connect / Play Console listings exist, define a "premium" entitlement attached to a
+   monthly + annual product, and paste the two platform SDK keys into Settings -> Monetization. */
+const RC_ENTITLEMENT_ID = 'premium';
+let rc = { configured: false, entitled: false };
+
+async function initRevenueCat(){
+  const platform = nativePlatform();
+  if(!platform) return; // web/PWA — RevenueCat's mobile SDK doesn't apply here
+  const keys = STATE.settings.revenueCat || {};
+  const apiKey = platform === 'ios' ? keys.iosApiKey : keys.androidApiKey;
+  if(!apiKey) return; // not set up yet — isEntitled() falls back to the local state machine
+  const Purchases = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Purchases;
+  if(!Purchases) return;
+  try{
+    await Purchases.configure({ apiKey });
+    rc.configured = true;
+    await refreshRevenueCatEntitlement();
+  }catch(e){ console.warn('RevenueCat init failed: ' + errMsg(e)); }
+}
+async function refreshRevenueCatEntitlement(){
+  if(!rc.configured) return;
+  try{
+    const Purchases = window.Capacitor.Plugins.Purchases;
+    const { customerInfo } = await Purchases.getCustomerInfo();
+    rc.entitled = !!(customerInfo.entitlements.active && customerInfo.entitlements.active[RC_ENTITLEMENT_ID]);
+  }catch(e){ console.warn('RevenueCat entitlement check failed: ' + errMsg(e)); }
+}
+// Buys the given plan through Apple's / Google's real purchase sheet via RevenueCat. Mirrors the
+// resulting entitlement into STATE.subscription too, purely so the existing "days left" / plan-name
+// UI copy stays coherent — isEntitled() itself trusts rc.entitled, not this mirrored local state.
+async function purchaseViaRevenueCat(plan){
+  const Purchases = window.Capacitor.Plugins.Purchases;
+  try{
+    // PurchasesOfferings has a `.current` offering with `.monthly`/`.annual` package shortcuts
+    // pre-matched to the predefined RevenueCat package types — no need to search availablePackages.
+    const offerings = await Purchases.getOfferings();
+    const current = offerings.current;
+    const pkg = current && (plan === 'annual' ? current.annual : current.monthly);
+    if(!pkg){ flashToast('This plan isn’t set up in RevenueCat yet.'); return; }
+    const { customerInfo } = await Purchases.purchasePackage({ aPackage: pkg });
+    rc.entitled = !!(customerInfo.entitlements.active && customerInfo.entitlements.active[RC_ENTITLEMENT_ID]);
+    if(rc.entitled){
+      STATE.subscription = { status: 'active', plan, trialEndsAt: null, canceledAt: null };
+      persist();
+      flashToast('Subscribed — welcome to MonIQ Premium.');
+    }
+    render();
+  }catch(e){
+    // PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR === '1' — the user just backed out, not a real error.
+    if(e && (e.userCancelled || e.code === '1')) return;
+    flashToast('Purchase failed: ' + errMsg(e));
+  }
+}
+// The plugin has no in-app "manage subscription" call — Apple/Google's own subscription pages are
+// the real source of truth (and the only place a native subscription can actually be canceled), so
+// this opens those directly rather than mutating any state here. window.open(..., '_system') is
+// Capacitor's documented way to hand a URL to the system browser instead of the in-app WebView.
+async function manageNativeSubscription(){
+  const platform = nativePlatform();
+  const url = platform === 'ios' ? 'https://apps.apple.com/account/subscriptions'
+    : platform === 'android' ? 'https://play.google.com/store/account/subscriptions?package=com.avencia.moniq'
+    : null;
+  if(url) window.open(url, '_system');
+  // The store doesn't notify RevenueCat instantly, so this re-check is best-effort — the definitive
+  // refresh happens next time the app launches (initRevenueCat() runs again then).
+  setTimeout(() => { refreshRevenueCatEntitlement().then(render); }, 1500);
+}
 // Combine an imported dataset into the current one without deleting anything on either side.
 // Used for household "shared access": each person exports their log, the other imports with Merge.
 function mergeState(remote){
@@ -1692,15 +1770,20 @@ function micIconSvg(){
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-// True only when this code is running inside a native iOS app shell (e.g. wrapped with Capacitor),
-// never when running as a plain website or installed PWA. Apple's Guideline 3.1.1 prohibits linking
-// out to external payment pages (like Stripe) to unlock in-app subscriptions — so the Stripe checkout
-// path must be hidden here and only used on the web/PWA version sold outside the App Store.
-function isNativeIOSApp(){
+// Returns 'ios' | 'android' when running inside the native app shell (Capacitor), or null on the
+// web/PWA. Both Apple (Guideline 3.1.1) and Google (Play Billing policy) prohibit linking out to an
+// external payment page (like Stripe) to unlock in-app subscriptions — so the Stripe checkout path
+// must be hidden on both native platforms and only used on the web/PWA version sold outside the stores.
+function nativePlatform(){
   try{
-    return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() && window.Capacitor.getPlatform && window.Capacitor.getPlatform() === 'ios');
-  }catch(e){ return false; }
+    if(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()){
+      return window.Capacitor.getPlatform();
+    }
+  }catch(e){}
+  return null;
 }
+function isNativeIOSApp(){ return nativePlatform() === 'ios'; }
+function isNativeApp(){ return !!nativePlatform(); }
 
 /* ============================= CATEGORIES TAB ============================= */
 function renderCategories(){
@@ -1959,6 +2042,14 @@ function renderAccountHouseholdDashboard(){
 function renderSubscriptionStatusBlock(){
   const sub = STATE.subscription;
   const status = effectiveSubscriptionStatus();
+  const platform = nativePlatform();
+  if(rc.configured){
+    if(rc.entitled){
+      return `<div class="stat-row"><div class="stat pos"><div class="v">Subscribed</div><div class="l">Verified via ${platform === 'ios' ? 'Apple' : 'Google'}</div></div></div>
+      <button class="pill-btn danger" id="settingsManageNativeSubBtn" style="margin-top:12px;">Manage Subscription</button>`;
+    }
+    return `<div class="small-note">No active subscription. <a href="#" data-action="goToTab" data-tab="trial" style="color:var(--gold-bright); text-decoration:underline;">Start your free trial</a>.</div>`;
+  }
   if(status === 'trial'){
     const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
     return `<div class="stat-row"><div class="stat"><div class="v">Free Trial</div><div class="l">${daysLeft} Day${daysLeft===1?'':'s'} Left</div></div><div class="stat"><div class="v">${sub.plan==='annual'?'S$100.90/yr':'S$9.90/mo'}</div><div class="l">After Trial</div></div></div>
@@ -2015,11 +2106,18 @@ function renderSettings(){
 
   <div class="card">
     <h2>Monetization</h2>
-    <div class="card-desc">Your subscription status, and where "Continue to Secure Checkout" sends people.</div>
+    <div class="card-desc">Your subscription status, and how real payments get verified on each platform.</div>
     ${renderSubscriptionStatusBlock()}
     <hr class="hairline">
     <div class="small-note" style="margin-bottom:14px; line-height:1.6;">
-      Once this app is live on the App Store / Google Play, subscriptions there are handled entirely by Apple's / Google's own purchase system — nothing to configure here. If you also want to sell directly from the web, create a <strong style="color:var(--gold-bright);">Payment Link</strong> in your Stripe Dashboard for each plan (no code required) and paste the links below — the Checkout page will send people there for a secure, hosted payment page. <strong style="color:var(--gold-bright);">This Stripe path automatically hides itself when the app is running inside the native iOS app</strong> (Apple doesn't allow linking out to external payment pages for subscriptions) — it only ever appears on the website/PWA version.
+      <strong style="color:var(--gold-bright);">In the iOS / Android app.</strong> Subscriptions go through Apple's / Google's own purchase screen, verified by <strong style="color:var(--gold-bright);">RevenueCat</strong> — this is what actually enforces "you must be subscribed to use MonIQ" on a real device (editing this app's local data can't fake it). Set up: create a free account at revenuecat.com, add your iOS/Android apps once their App Store Connect / Play Console listings exist, define a <code>premium</code> entitlement attached to a monthly + annual product, then paste the two public SDK keys below.
+    </div>
+    <div class="field"><label>RevenueCat API Key — iOS</label><input type="text" id="rcIosKey" value="${escapeHtml(STATE.settings.revenueCat.iosApiKey||'')}" placeholder="appl_..."></div>
+    <div class="field"><label>RevenueCat API Key — Android</label><input type="text" id="rcAndroidKey" value="${escapeHtml(STATE.settings.revenueCat.androidApiKey||'')}" placeholder="goog_..."></div>
+    <button class="pill-btn" id="saveRevenueCatKeysBtn">Save RevenueCat Keys</button>
+    <hr class="hairline">
+    <div class="small-note" style="margin:14px 0; line-height:1.6;">
+      <strong style="color:var(--gold-bright);">On the web / PWA.</strong> Apple and Google both require in-app subscriptions to go through their own purchase system, so this Stripe path is hidden inside the native app on both platforms and only ever appears on the website. Create a <strong style="color:var(--gold-bright);">Payment Link</strong> in your Stripe Dashboard for each plan (no code required) and paste the links below — the Checkout page will send web visitors there for a secure, hosted payment page.
     </div>
     <div class="field"><label>Stripe Payment Link — Monthly (S$9.90/mo)</label><input type="text" id="stripeLinkMonthly" value="${escapeHtml(STATE.settings.stripeLinks.monthly||'')}" placeholder="https://buy.stripe.com/..."></div>
     <div class="field"><label>Stripe Payment Link — Annual (S$100.90/yr)</label><input type="text" id="stripeLinkAnnual" value="${escapeHtml(STATE.settings.stripeLinks.annual||'')}" placeholder="https://buy.stripe.com/..."></div>
@@ -2114,8 +2212,21 @@ function renderCheckout(){
   const sub = STATE.subscription;
   const status = effectiveSubscriptionStatus();
   const stripeLink = STATE.settings.stripeLinks ? STATE.settings.stripeLinks[plan] : '';
+  const platform = nativePlatform();
 
-  if(status === 'trial'){
+  // Real, RevenueCat-verified purchase already active — nothing left to sell.
+  if(rc.configured && rc.entitled){
+    return `
+    <div class="card" style="text-align:center; padding:40px 28px;">
+      <h2>You're Subscribed</h2>
+      <div class="card-desc">Verified through ${platform === 'ios' ? 'Apple' : 'Google'} via RevenueCat.</div>
+      <div class="small-note">Manage, change plan or cancel any time through ${platform === 'ios' ? 'Apple' : 'Google'}'s own subscription settings.</div>
+      <button class="pill-btn danger" id="manageNativeSubBtn" style="margin-top:14px;">Manage Subscription</button>
+    </div>`;
+  }
+  // RevenueCat is wired up but hasn't reported an entitlement yet — always defer to it rather than
+  // the local trial/active state below, which native purchases don't touch.
+  if(!rc.configured && status === 'trial'){
     const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
@@ -2125,7 +2236,7 @@ function renderCheckout(){
       <button class="pill-btn danger" id="cancelTrialBtn">Cancel Trial</button>
     </div>`;
   }
-  if(status === 'active'){
+  if(!rc.configured && status === 'active'){
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
       <h2>You're Subscribed</h2>
@@ -2148,18 +2259,23 @@ function renderCheckout(){
     </div>
 
     <div class="cat-section-title" style="margin-top:24px;"><h3>Step 2 — Payment Details</h3></div>
-    ${stripeLink && !isNativeIOSApp() ? `
-      <div class="small-note" style="margin-bottom:14px;">You'll be taken to a secure, Stripe-hosted checkout page to enter your card details — this app never sees or stores your card information.</div>
-      <button class="btn-primary" id="goToStripeBtn">Continue to Secure Checkout</button>
-    ` : isNativeIOSApp() ? `
+    ${platform && rc.configured ? `
       <div class="small-note" style="margin-bottom:14px; line-height:1.6;">
-        On iOS, subscriptions are handled entirely through Apple's built-in purchase screen — this keeps things secure and follows App Store requirements. Tap below to continue with Apple.
+        Subscriptions are handled entirely through ${platform === 'ios' ? "Apple's" : "Google's"} built-in purchase screen via RevenueCat — this app never sees or stores your card information. Tap below to continue.
+      </div>
+      <button class="btn-primary" id="rcPurchaseBtn">${ui.trialFlow ? 'Start Free Trial' : 'Continue to ' + (platform === 'ios' ? 'Apple' : 'Google') + ' Purchase'}</button>
+    ` : platform ? `
+      <div class="small-note" style="margin-bottom:14px; line-height:1.6;">
+        Real purchases aren't connected yet — RevenueCat needs to be set up for this platform first (see Settings → Monetization). ${platform === 'ios' ? "Apple" : "Google"} requires subscriptions to go through their own in-app purchase system, so a Stripe link can't be used here.
       </div>
       <button class="btn-primary" id="simulateStartBtn">${ui.trialFlow ? 'Start Free Trial (Preview)' : 'Complete Purchase (Preview)'}</button>
-      <div class="small-note">This preview button only updates local state so you can test the trial/cancel experience — it stands in for Apple's real purchase sheet, which triggers automatically once this is a published native app.</div>
+      <div class="small-note">This preview button only updates local state so you can test the trial/cancel experience — it stands in for the real purchase sheet, which activates once RevenueCat is configured.</div>
+    ` : stripeLink ? `
+      <div class="small-note" style="margin-bottom:14px;">You'll be taken to a secure, Stripe-hosted checkout page to enter your card details — this app never sees or stores your card information.</div>
+      <button class="btn-primary" id="goToStripeBtn">Continue to Secure Checkout</button>
     ` : `
       <div class="small-note" style="margin-bottom:14px; line-height:1.6;">
-        Payment collection isn't connected yet. Once this app is live on the App Store or Google Play, this step happens automatically through Apple's / Google's built-in purchase screen — secure by design, no custom card form needed. If you'd rather sell directly from the web instead, connect a Stripe Payment Link under Settings → Monetization.
+        Payment collection isn't connected yet. Connect a Stripe Payment Link under Settings → Monetization to sell from the web, or RevenueCat to sell through the App Store / Google Play.
       </div>
       <button class="btn-primary" id="simulateStartBtn">${ui.trialFlow ? 'Start Free Trial (Preview)' : 'Complete Purchase (Preview)'}</button>
       <div class="small-note">This preview button only updates local state so you can test the trial/cancel experience — no real payment is processed.</div>
@@ -2391,6 +2507,10 @@ function attachGlobalHandlers(){
       const link = STATE.settings.stripeLinks[ui.selectedPlan || 'annual'];
       if(link) window.open(link, '_blank', 'noopener,noreferrer');
     });
+    const rcPurchaseBtn = document.getElementById('rcPurchaseBtn');
+    if(rcPurchaseBtn) rcPurchaseBtn.addEventListener('click', () => { purchaseViaRevenueCat(ui.selectedPlan || 'annual'); });
+    const manageNativeSubBtn = document.getElementById('manageNativeSubBtn');
+    if(manageNativeSubBtn) manageNativeSubBtn.addEventListener('click', () => { manageNativeSubscription(); });
     const simulateStartBtn = document.getElementById('simulateStartBtn');
     if(simulateStartBtn) simulateStartBtn.addEventListener('click', () => {
       if(ui.trialFlow){ startTrial(ui.selectedPlan || 'annual'); flashToast('Free trial started (preview) — no real charge occurred.'); }
@@ -2667,6 +2787,14 @@ function attachGlobalHandlers(){
       if(STATE.settings.currencies[e.target.value] === undefined) STATE.settings.currencies[e.target.value] = 1;
       persist(); render();
     });
+    const saveRevenueCatKeysBtn = document.getElementById('saveRevenueCatKeysBtn');
+    if(saveRevenueCatKeysBtn) saveRevenueCatKeysBtn.addEventListener('click', () => {
+      STATE.settings.revenueCat.iosApiKey = document.getElementById('rcIosKey').value.trim();
+      STATE.settings.revenueCat.androidApiKey = document.getElementById('rcAndroidKey').value.trim();
+      persist();
+      flashToast('RevenueCat keys saved.');
+      initRevenueCat().then(() => render());
+    });
     const saveStripeLinksBtn = document.getElementById('saveStripeLinksBtn');
     if(saveStripeLinksBtn) saveStripeLinksBtn.addEventListener('click', () => {
       STATE.settings.stripeLinks.monthly = document.getElementById('stripeLinkMonthly').value.trim();
@@ -2675,6 +2803,8 @@ function attachGlobalHandlers(){
       flashToast('Payment links saved.');
       render();
     });
+    const settingsManageNativeSubBtn = document.getElementById('settingsManageNativeSubBtn');
+    if(settingsManageNativeSubBtn) settingsManageNativeSubBtn.addEventListener('click', () => { manageNativeSubscription(); });
     const settingsCancelTrialBtn = document.getElementById('settingsCancelTrialBtn');
     if(settingsCancelTrialBtn) settingsCancelTrialBtn.addEventListener('click', () => {
       if(!confirm('Cancel your free trial? You will not be charged.')) return;
@@ -3027,8 +3157,12 @@ function handleVoiceTranscript(transcript){
 
 
 /* ============================= INIT ============================= */
-loadState();
 loadCloudConfig();
+(async () => {
+  await loadState(); // must finish first — it replaces STATE wholesale, and RC needs the real saved API keys, not the defaults
+  await initRevenueCat();
+  render();
+})();
 </script>
 </body>
 </html>

@@ -14,6 +14,12 @@ app yet — a few things still need real hardware/accounts that can't be provide
   not something fixable in JavaScript alone
 - Microphone/speech permission descriptions added to `ios/App/App/Info.plist`
 - `RECORD_AUDIO` and `INTERNET` permissions added to `android/app/src/main/AndroidManifest.xml`
+- Every screen except Intro/Demo/Settings/Trial/Pricing/Checkout/Terms/Privacy now requires an active
+  trial or subscription to use — real enforcement, not just the pricing copy
+- Real subscription verification wired up via **RevenueCat** (`@revenuecat/purchases-capacitor`) for
+  the native iOS/Android app — it wraps Apple's / Google's own purchase system and validates the
+  result server-side, so it can't be spoofed by editing the app's local data the way the old
+  local-only "preview" buttons could be. See "Connect RevenueCat" below to activate it.
 
 ## What you still need to do
 
@@ -21,6 +27,22 @@ app yet — a few things still need real hardware/accounts that can't be provide
 - Generate real app icons and a splash screen (currently using Capacitor's default placeholder icon).
   Tools like [Icon Kitchen](https://icon.kitchen) or [App Icon Generator](https://appicon.co) can
   generate the full icon set from a single image, free, from a phone browser.
+- **Connect RevenueCat**, so the app enforces subscriptions for real instead of falling back to the
+  local "preview" trial/purchase buttons:
+  1. Sign up free at [revenuecat.com](https://www.revenuecat.com) (their free tier covers this app's
+     scale — no cost until you're doing meaningful revenue).
+  2. Add your iOS and/or Android app in the RevenueCat dashboard — this needs the App Store Connect /
+     Play Console listing to already exist (see below), so this step comes after those accounts.
+  3. Create an entitlement identifier exactly named `premium`, attach it to a monthly and an annual
+     product priced to match S$9.90/mo and S$100.90/yr (or your actual prices), and put them in the
+     "current" offering.
+  4. In the app itself (or by editing `STATE.settings.revenueCat` directly for a fresh install),
+     go to Settings → Monetization and paste in the iOS and Android **public** SDK keys from
+     RevenueCat's dashboard (Project Settings → API keys — use the public app keys, never the secret
+     key). Until these are set, the app keeps using the local-only trial/purchase preview exactly as
+     before, so nothing breaks by leaving this for last.
+  5. Test with a real device using [sandbox/test purchases](https://www.revenuecat.com/docs/test-and-launch/sandbox)
+     before submitting — a purchase can't be fully verified in a simulator.
 
 ### iOS — needs a Mac, or a cloud Mac
 - An Apple Developer Program account ($99/year, signs up at developer.apple.com) — this can only be
