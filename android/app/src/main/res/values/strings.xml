@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">MonIQ</string>
+    <string name="title_activity_main">MonIQ</string>
+    <string name="package_name">com.avencia.moniq</string>
+    <string name="custom_url_scheme">com.avencia.moniq</string>
+</resources>
