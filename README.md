@@ -21,6 +21,29 @@ app yet — a few things still need real hardware/accounts that can't be provide
   result server-side, so it can't be spoofed by editing the app's local data the way the old
   local-only "preview" buttons could be. See "Connect RevenueCat" below to activate it.
 
+## Testing the app right now (no Apple/Google account needed)
+
+### Web / PWA — auto-deployed to GitHub Pages
+`.github/workflows/deploy-pages.yml` publishes `www/` to GitHub Pages on every push to `main` (and can
+be run manually from the Actions tab via "Run workflow"). Once the first run finishes, the app is live at:
+
+**https://marcustoh108.github.io/moniq-native/**
+
+Open that on your phone or desktop browser — everything works except two native-only pieces: the
+native speech-recognition plugin (falls back to the browser's own Web Speech API, which works fine in
+a real browser — it only breaks inside a packaged app's WebView) and RevenueCat purchases (falls back
+to the local "Preview" trial/purchase buttons). Nothing to configure — the first push after this was
+added triggers the first deploy; check progress under the repo's **Actions** tab.
+
+### Android — real native app via Codemagic, auto-built
+`codemagic.yaml`'s `android-debug` workflow now triggers automatically on every push to `main`, so
+once you've connected this repo in Codemagic (a one-time sign-up + "Add application" step only you can
+authorize — codemagic.io → sign up with GitHub → select this repo), it keeps a fresh sideloadable APK
+ready with no further clicks. Grab it from the workflow's **Artifacts** after a run finishes, or trigger
+one immediately yourself (Codemagic dashboard → this app → `android-debug` → Start new build) instead
+of waiting for the next push. Install steps: transfer the `.apk` to your Android phone, tap it, and
+allow "Install unknown apps" for whichever app you opened it from when prompted.
+
 ## What you still need to do
 
 ### Both platforms
@@ -63,8 +86,8 @@ It still needs your Apple Developer and Google Play accounts connected, since on
 those, but it removes the need to own a Mac or run Android Studio locally.
 
 A `codemagic.yaml` is already checked into this repo with three workflows:
-- **`android-debug`** — builds an unsigned, sideloadable APK. No accounts needed; use this first to
-  confirm the project builds and to test on your own Android phone.
+- **`android-debug`** — builds an unsigned, sideloadable APK, automatically on every push to `main`.
+  No accounts needed; see "Testing the app right now" above.
 - **`android-release`** — builds a signed `.aab` for Google Play. Needs a keystore uploaded in
   Codemagic's dashboard (Team settings → Code signing identities → Android) named
   `moniq_android_keystore` — Codemagic can generate one for you if you don't have one.

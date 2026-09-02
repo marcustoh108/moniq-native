@@ -2,12 +2,21 @@ workflows:
   # ---------------------------------------------------------------------------
   # Android — debug build. No signing/accounts needed. Produces a sideloadable
   # APK so you can test the app on your own phone before Google Play is set up.
-  # Run manually from the Codemagic dashboard (Start new build).
+  # Builds automatically on every push to main once this repo is connected in
+  # the Codemagic dashboard — no manual "Start new build" click needed after
+  # that one-time connection. Trigger it once by hand too, to get a first APK
+  # without waiting for the next push.
   # ---------------------------------------------------------------------------
   android-debug:
     name: MonIQ Android (Debug / sideload)
     max_build_duration: 30
     instance_type: linux_x2
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
     environment:
       node: 20.18.1
     scripts:
