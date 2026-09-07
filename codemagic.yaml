@@ -109,6 +109,7 @@ workflows:
       vars:
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
+        BUNDLE_ID: "com.avencia.moniq"
     scripts:
       - name: Install npm dependencies
         script: npm ci
@@ -125,8 +126,6 @@ workflows:
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
             --create
-        env:
-          BUNDLE_ID: com.avencia.moniq
       - name: Add certificates to keychain
         script: keychain add-certificates
       - name: Set up code signing settings on Xcode project
