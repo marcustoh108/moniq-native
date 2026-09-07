@@ -18,6 +18,7 @@ workflows:
         - pattern: main
           include: true
     environment:
+      java: 21
       node: 22.11.0
     scripts:
       - name: Install npm dependencies
@@ -55,6 +56,7 @@ workflows:
         - moniq_android_keystore
       # groups:
       #   - google_play
+      java: 21
       node: 22.11.0
     scripts:
       - name: Install npm dependencies
