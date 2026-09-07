@@ -1294,7 +1294,7 @@ function renderIESPieGeneric(slices, centerLabel){
     paths += `<path d="M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} L ${xi0} ${yi0} A ${rInner} ${rInner} 0 ${large} 0 ${xi1} ${yi1} Z" fill="${s.color}" stroke="#0a0a0c" stroke-width="1.5"><title>${escapeHtml(s.name)}: ${fmt(s.value)}</title></path>`;
     angle += sweep;
   });
-  const legend = slices.map(s => `<div class="legend-item"><span class="legend-swatch" style="background:${s.color};"></span>${escapeHtml(s.name)} — ${(s.value/total*100).toFixed(0)}%</div>`).join('');
+  const legend = slices.map(s => `<div class="legend-item"><span class="legend-swatch" style="background:${s.color};"></span>${escapeHtml(s.name)} — ${(s.value/total*100).toFixed(1)}%</div>`).join('');
   return `
   <svg viewBox="0 0 280 280" style="width:100%; max-width:280px; display:block; margin:0 auto;">
     ${paths}
@@ -1317,7 +1317,6 @@ function renderOverview(){
   const maxVal = Math.max(1, ...monthData.map(d => Math.max(d.income, d.expense)));
 
   const savingsForPie = Math.max(0, y.net);
-  const iesTotal = y.income + y.expense + savingsForPie;
 
   return `
   <div class="card" style="text-align:center; padding:18px 24px;">
@@ -1377,9 +1376,12 @@ function renderOverview(){
 
   <div class="grid-2">
     <div class="card">
-      <h2>Income · Expense · Savings</h2>
+      <h2>Expenses Vs Savings</h2>
       <div class="card-desc">Relative share year-to-date, ${STATE.goal.year}</div>
-      ${iesTotal > 0 ? renderIESPie(y.income, y.expense, savingsForPie) : '<div class="empty-state">No activity recorded yet this year.</div>'}
+      ${(y.expense + savingsForPie) > 0 ? renderIESPieGeneric([
+        {name:'Expenses', value:y.expense, color:'#ff5c5c'},
+        {name:'Savings', value:savingsForPie, color:'#6fe08a'},
+      ], 'TOTAL') : '<div class="empty-state">No activity recorded yet this year.</div>'}
     </div>
 
     <div class="card">
@@ -1394,45 +1396,6 @@ function renderOverview(){
   </div>
   `;
 }
-
-function renderIESPie(income, expense, savings){
-  const total = income + expense + savings;
-  const slices = [
-    {name:'Income', value:income, color:'#ff9f43'},
-    {name:'Expenses', value:expense, color:'#ff5c5c'},
-    {name:'Savings', value:savings, color:'#6fe08a'},
-  ].filter(s => s.value > 0);
-  const cx=140, cy=140, r=110, rInner=62;
-  let angle = -90;
-  let paths = '';
-  slices.forEach(s => {
-    const frac = s.value/total;
-    const sweep = frac*360;
-    const large = sweep>180?1:0;
-    const a0 = angle * Math.PI/180;
-    const a1 = (angle+sweep) * Math.PI/180;
-    const x0 = cx + r*Math.cos(a0), y0 = cy + r*Math.sin(a0);
-    const x1 = cx + r*Math.cos(a1), y1 = cy + r*Math.sin(a1);
-    const xi0 = cx + rInner*Math.cos(a1), yi0 = cy + rInner*Math.sin(a1);
-    const xi1 = cx + rInner*Math.cos(a0), yi1 = cy + rInner*Math.sin(a0);
-    paths += `<path d="M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} L ${xi0} ${yi0} A ${rInner} ${rInner} 0 ${large} 0 ${xi1} ${yi1} Z" fill="${s.color}" stroke="#0a0a0c" stroke-width="1.5"><title>${s.name}: ${fmt(s.value)} (${(frac*100).toFixed(1)}%)</title></path>`;
-    angle += sweep;
-  });
-  const legend = slices.map(s => {
-    const frac = (s.value/total*100).toFixed(1);
-    return `<div class="legend-item"><span class="legend-swatch" style="background:${s.color};"></span>${s.name} — ${frac}%</div>`;
-  }).join('');
-  return `
-  <svg viewBox="0 0 280 280" style="width:100%; max-width:280px; display:block; margin:0 auto;">
-    ${paths}
-    <text x="140" y="134" text-anchor="middle" font-family="Cormorant Garamond" font-size="18" fill="#f2ede2" font-weight="600">${fmt(total)}</text>
-    <text x="140" y="152" text-anchor="middle" font-family="Jost" font-size="9.5" fill="#9c9587" letter-spacing="1">COMBINED TOTAL</text>
-  </svg>
-  <div class="legend" style="justify-content:center;">${legend}</div>
-  <div class="small-note" style="text-align:center;">Savings is floored at S$0 for this chart when net YTD is negative.</div>
-  `;
-}
-
 
 function renderTrendChart(months, data, maxVal){
   const W = 1080, H = 260, padL = 40, padB = 26, padT = 10;
