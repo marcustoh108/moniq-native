@@ -1330,7 +1330,7 @@ function renderOverview(){
     <h2>Financial Goal</h2>
     <div class="card-desc">Target savings — income less expenses — to reach by end of ${STATE.goal.year}</div>
     <div class="goal-row">
-      <div class="goal-amount-display">To have <span class="of">${fmt(goal)}</span> by end of ${STATE.goal.year}</div>
+      <div class="goal-amount-display">To Save <span class="of">${fmt(goal)}</span> by the end of ${STATE.goal.year}</div>
       <button class="pill-btn" id="editGoalBtn">Edit Goal</button>
     </div>
     <div id="goalEditBox" style="display:none; margin-top:12px;">
@@ -1370,7 +1370,7 @@ function renderOverview(){
     <h2>The Year at a Glance</h2>
     <div class="card-desc">How far through ${STATE.goal.year} you are, versus how far toward your goal you are</div>
     <div style="display:flex; justify-content:center; gap:56px; flex-wrap:wrap; padding:8px 0;">
-      ${renderRingGauge(100 - yearPct, 'var(--gold-bright)', `Year ${STATE.goal.year} Remaining`, 'OF YEAR TO GO')}
+      ${renderRingGauge(100 - yearPct, 'var(--gold-bright)', '% of Year Remaining', 'OF YEAR TO GO')}
       ${renderRingGauge(pct, goal>0 && pct>=100 ? 'var(--sage)' : 'var(--gold-bright)', 'Financial Goal Achieved', 'OF GOAL REACHED')}
     </div>
   </div>
