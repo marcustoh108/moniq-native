@@ -18,7 +18,7 @@ workflows:
         - pattern: main
           include: true
     environment:
-      node: 20.18.1
+      node: 22.11.0
     scripts:
       - name: Install npm dependencies
         script: npm ci
@@ -55,7 +55,7 @@ workflows:
         - moniq_android_keystore
       # groups:
       #   - google_play
-      node: 20.18.1
+      node: 22.11.0
     scripts:
       - name: Install npm dependencies
         script: npm ci
@@ -103,7 +103,7 @@ workflows:
       ios_signing:
         distribution_type: app_store
         bundle_identifier: com.avencia.moniq
-      node: 20.18.1
+      node: 22.11.0
       xcode: latest
       cocoapods: default
       vars:
