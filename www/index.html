@@ -3003,8 +3003,8 @@ async function toggleNativeVoiceInput(){
   try{
     const avail = await plugin.available();
     if(!avail || !avail.available){ flashToast('Voice input is not available on this device.'); return; }
-    const perm = await plugin.requestPermission();
-    const granted = perm && (perm.speechRecognition === 'granted' || perm.permission === true);
+    const perm = await plugin.requestPermissions();
+    const granted = perm && perm.speechRecognition === 'granted';
     if(!granted){
       flashToast('Microphone/speech permission was denied. Enable it in your device Settings for this app, then try again.');
       return;
