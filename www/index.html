@@ -346,10 +346,11 @@ function isEntitled(){
   const s = effectiveSubscriptionStatus();
   return s === 'trial' || s === 'active';
 }
-// Tabs that require an active trial or subscription. Intro/Demo (so people can see the app before
-// paying), the billing tabs themselves (Trial/Pricing/Checkout/Settings), and the legal pages stay
-// open regardless of subscription status.
-const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data']);
+// Tabs that require an active trial or subscription. Only Intro and Demo (so people can see the app
+// before paying) stay open regardless of subscription status; the billing tabs themselves
+// (Trial/Pricing/Checkout) and the legal pages are separate ui.tab states reached only via buttons —
+// never part of GATED_TABS since they're how a locked-out user actually subscribes.
+const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data','settings']);
 
 /* ============================= REVENUECAT (native purchases) =============================
    RevenueCat wraps StoreKit (iOS) / Play Billing (Android) and validates receipts against its own
@@ -1142,6 +1143,7 @@ function renderTabContent(){
 const GATED_TAB_LABELS = {
   add: 'Add Entry', overview: 'Overview', transactions: 'Transactions', categories: 'Categories',
   bills: 'Bills', networth: 'Net Worth', reports: 'Reports', account: 'Sharing', data: 'Data',
+  settings: 'Settings',
 };
 function renderPaywall(){
   const label = GATED_TAB_LABELS[ui.tab] || 'This feature';
@@ -1304,7 +1306,7 @@ function renderDemo(){
     <h2>Ready to track your own numbers?</h2>
     <div class="card-desc">Start your free trial — cancel any time in the first 3 days</div>
     <button class="btn-primary" id="demoTryFreeBtn" style="margin-top:8px;">Try Free For 3 Days</button>
-    <div class="small-note">Then S$9.90/month or S$100.90/year.</div>
+    <div class="small-note">Then S$5.90/month or S$69.90/year.</div>
   </div>
   `;
 }
@@ -1356,9 +1358,9 @@ function renderOverview(){
 
   <div class="card goal-hero">
     <h2>Financial Goal</h2>
-    <div class="card-desc">Target savings — income less expenses — to reach by end of ${STATE.goal.year}</div>
+    <div class="card-desc">Target savings — income less expenses — to reach by the end of the year</div>
     <div class="goal-row">
-      <div class="goal-amount-display">To Save <span class="of">${fmt(goal)}</span> by the end of ${STATE.goal.year}</div>
+      <div class="goal-amount-display">To Save <span class="of">${fmt(goal)}</span> By The End Of The Year</div>
       <button class="pill-btn" id="editGoalBtn">Edit Goal</button>
     </div>
     <div id="goalEditBox" style="display:none; margin-top:12px;">
@@ -1396,7 +1398,7 @@ function renderOverview(){
 
   <div class="card">
     <h2>The Year at a Glance</h2>
-    <div class="card-desc">How far through ${STATE.goal.year} you are, versus how far toward your goal you are</div>
+    <div class="card-desc">How far through the year you are, versus how far toward your goal you are</div>
     <div style="display:flex; justify-content:center; gap:56px; flex-wrap:wrap; padding:8px 0;">
       ${renderRingGauge(100 - yearPct, 'var(--gold-bright)', '% of Year Remaining', 'OF YEAR TO GO')}
       ${renderRingGauge(pct, goal>0 && pct>=100 ? 'var(--sage)' : 'var(--gold-bright)', 'Financial Goal Achieved', 'OF GOAL REACHED')}
@@ -1406,7 +1408,7 @@ function renderOverview(){
   <div class="grid-2">
     <div class="card">
       <h2>Expenses Vs Savings</h2>
-      <div class="card-desc">Relative share year-to-date, ${STATE.goal.year}</div>
+      <div class="card-desc">Relative share year-to-date</div>
       ${(y.expense + savingsForPie) > 0 ? renderIESPieGeneric([
         {name:'Expenses', value:y.expense, color:'#ff5c5c'},
         {name:'Savings', value:savingsForPie, color:'#6fe08a'},
@@ -1414,7 +1416,7 @@ function renderOverview(){
     </div>
 
     <div class="card">
-      <h2>Income vs. Expense — ${STATE.goal.year}</h2>
+      <h2>Income vs. Expense</h2>
       <div class="card-desc">Monthly totals across the year</div>
       ${renderTrendChart(months, monthData, maxVal)}
       <div class="legend">
@@ -1524,7 +1526,7 @@ function renderExpensesByCategoryCard(year){
   return `
   <div class="card">
     <h2>Expenses By Category</h2>
-    <div class="card-desc">Monthly expense totals by category — year-to-date ${year}</div>
+    <div class="card-desc">Monthly expense totals by category — year-to-date</div>
     ${ytdCatNames.length ? renderCategoryStackedBars(ytdMonths, ytdData, ytdCatNames) : '<div class="empty-state">No expenses recorded yet this year.</div>'}
   </div>
   <div class="card">
@@ -1975,7 +1977,7 @@ function renderSubscriptionStatusBlock(){
   }
   if(status === 'trial'){
     const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
-    return `<div class="stat-row"><div class="stat"><div class="v">Free Trial</div><div class="l">${daysLeft} Day${daysLeft===1?'':'s'} Left</div></div><div class="stat"><div class="v">${sub.plan==='annual'?'S$100.90/yr':'S$9.90/mo'}</div><div class="l">After Trial</div></div></div>
+    return `<div class="stat-row"><div class="stat"><div class="v">Free Trial</div><div class="l">${daysLeft} Day${daysLeft===1?'':'s'} Left</div></div><div class="stat"><div class="v">${sub.plan==='annual'?'S$69.90/yr':'S$5.90/mo'}</div><div class="l">After Trial</div></div></div>
     <button class="pill-btn danger" id="settingsCancelTrialBtn" style="margin-top:12px;">Cancel Trial</button>`;
   }
   if(status === 'active'){
@@ -2042,8 +2044,8 @@ function renderSettings(){
     <div class="small-note" style="margin:14px 0; line-height:1.6;">
       <strong style="color:var(--gold-bright);">On the web / PWA.</strong> Apple and Google both require in-app subscriptions to go through their own purchase system, so this Stripe path is hidden inside the native app on both platforms and only ever appears on the website. Create a <strong style="color:var(--gold-bright);">Payment Link</strong> in your Stripe Dashboard for each plan (no code required) and paste the links below — the Checkout page will send web visitors there for a secure, hosted payment page.
     </div>
-    <div class="field"><label>Stripe Payment Link — Monthly (S$9.90/mo)</label><input type="text" id="stripeLinkMonthly" value="${escapeHtml(STATE.settings.stripeLinks.monthly||'')}" placeholder="https://buy.stripe.com/..."></div>
-    <div class="field"><label>Stripe Payment Link — Annual (S$100.90/yr)</label><input type="text" id="stripeLinkAnnual" value="${escapeHtml(STATE.settings.stripeLinks.annual||'')}" placeholder="https://buy.stripe.com/..."></div>
+    <div class="field"><label>Stripe Payment Link — Monthly (S$5.90/mo)</label><input type="text" id="stripeLinkMonthly" value="${escapeHtml(STATE.settings.stripeLinks.monthly||'')}" placeholder="https://buy.stripe.com/..."></div>
+    <div class="field"><label>Stripe Payment Link — Annual (S$69.90/yr)</label><input type="text" id="stripeLinkAnnual" value="${escapeHtml(STATE.settings.stripeLinks.annual||'')}" placeholder="https://buy.stripe.com/..."></div>
     <button class="pill-btn" id="saveStripeLinksBtn">Save Payment Links</button>
   </div>
 
@@ -2088,7 +2090,7 @@ function renderTrial(){
   <div class="card" style="text-align:center; padding:44px 28px;">
     <div style="font-family:'Cormorant Garamond', serif; font-size:34px; color:var(--gold-bright); font-weight:700;">3 Days Free Trial</div>
     <div style="font-size:15px; color:var(--ivory); margin-top:16px; line-height:1.7;">
-      Then S$9.90 per month <span style="color:var(--gold-bright); font-style:italic;">or</span> S$100.90 per year.<br>
+      Then S$5.90 per month <span style="color:var(--gold-bright); font-style:italic;">or</span> S$69.90 per year.<br>
       Billing starts at the end of the free trial period unless you cancel.
     </div>
     <div class="small-note" style="margin:22px 0; line-height:1.6; max-width:420px; margin-left:auto; margin-right:auto;">
@@ -2097,8 +2099,8 @@ function renderTrial(){
     <div class="field" style="max-width:320px; margin:0 auto 20px;">
       <label>Choose your plan (applies after the trial ends)</label>
       <div style="display:flex; gap:10px;">
-        <button class="pill-btn ${ui.selectedPlan!=='annual'?'solid':''}" data-action="setPlan" data-plan="monthly" style="flex:1;">Monthly<br>S$9.90</button>
-        <button class="pill-btn ${ui.selectedPlan==='annual'?'solid':''}" data-action="setPlan" data-plan="annual" style="flex:1;">Annual<br>S$100.90</button>
+        <button class="pill-btn ${ui.selectedPlan!=='annual'?'solid':''}" data-action="setPlan" data-plan="monthly" style="flex:1;">Monthly<br>S$5.90</button>
+        <button class="pill-btn ${ui.selectedPlan==='annual'?'solid':''}" data-action="setPlan" data-plan="annual" style="flex:1;">Annual<br>S$69.90</button>
       </div>
     </div>
     <button class="btn-primary" id="startTrialFlowBtn">Start Free Trial</button>
@@ -2119,13 +2121,13 @@ function renderPricing(){
   <div class="grid-2">
     <div class="card" style="text-align:center;">
       <div style="font-family:'Cormorant Garamond', serif; font-size:14px; text-transform:uppercase; letter-spacing:0.15em; color:var(--muted-2);">Monthly Plan</div>
-      <div style="font-family:'Cormorant Garamond', serif; font-size:40px; color:var(--gold-bright); font-weight:700; margin:12px 0;">S$9.90<span style="font-size:15px; color:var(--muted);">/mo</span></div>
+      <div style="font-family:'Cormorant Garamond', serif; font-size:40px; color:var(--gold-bright); font-weight:700; margin:12px 0;">S$5.90<span style="font-size:15px; color:var(--muted);">/mo</span></div>
       <div class="small-note">Billed monthly, cancel any time.</div>
       <button class="btn-primary" data-action="selectPlanFromPricing" data-plan="monthly" style="margin-top:18px; width:100%;">Select Monthly</button>
     </div>
     <div class="card" style="text-align:center; border-color:var(--hairline-strong);">
       <div style="font-family:'Cormorant Garamond', serif; font-size:14px; text-transform:uppercase; letter-spacing:0.15em; color:var(--gold-bright);">Annual Plan <span class="flag" style="background:rgba(111,224,138,0.15); color:var(--sage); border-color:transparent;">Best Value</span></div>
-      <div style="font-family:'Cormorant Garamond', serif; font-size:40px; color:var(--gold-bright); font-weight:700; margin:12px 0;">S$100.90<span style="font-size:15px; color:var(--muted);">/yr</span></div>
+      <div style="font-family:'Cormorant Garamond', serif; font-size:40px; color:var(--gold-bright); font-weight:700; margin:12px 0;">S$69.90<span style="font-size:15px; color:var(--muted);">/yr</span></div>
       <div class="small-note">Billed once a year, cancel any time.</div>
       <button class="pill-btn solid" data-action="selectPlanFromPricing" data-plan="annual" style="margin-top:18px; width:100%;">Select Annual</button>
     </div>
@@ -2140,7 +2142,7 @@ function renderPricing(){
 
 function renderCheckout(){
   const plan = ui.selectedPlan || 'annual';
-  const price = plan === 'annual' ? 'S$100.90/year' : 'S$9.90/month';
+  const price = plan === 'annual' ? 'S$69.90/year' : 'S$5.90/month';
   const sub = STATE.subscription;
   const status = effectiveSubscriptionStatus();
   const stripeLink = STATE.settings.stripeLinks ? STATE.settings.stripeLinks[plan] : '';
@@ -2159,12 +2161,11 @@ function renderCheckout(){
   // RevenueCat is wired up but hasn't reported an entitlement yet — always defer to it rather than
   // the local trial/active state below, which native purchases don't touch.
   if(!rc.configured && status === 'trial'){
-    const daysLeft = Math.max(0, Math.ceil((sub.trialEndsAt - Date.now()) / 86400000));
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
       <h2>You're in Your Free Trial</h2>
-      <div class="card-desc">${daysLeft} day${daysLeft===1?'':'s'} left — then ${sub.plan==='annual'?'S$100.90/year':'S$9.90/month'}</div>
-      <div class="small-note" style="margin:16px 0;">You won't be charged until the trial ends. Cancel any time before then and you won't be billed at all.</div>
+      <div class="card-desc">Good choice. You're now moving closer to a better financial future.</div>
+      <div class="small-note" style="margin:16px 0;">You won't be charged until the trial ends — then ${sub.plan==='annual'?'S$69.90/year':'S$5.90/month'}. Cancel any time before then and you won't be billed at all.</div>
       <button class="pill-btn danger" id="cancelTrialBtn">Cancel Trial</button>
     </div>`;
   }
@@ -2172,7 +2173,7 @@ function renderCheckout(){
     return `
     <div class="card" style="text-align:center; padding:40px 28px;">
       <h2>You're Subscribed</h2>
-      <div class="card-desc">${sub.plan==='annual'?'Annual':'Monthly'} plan — ${sub.plan==='annual'?'S$100.90/year':'S$9.90/month'}</div>
+      <div class="card-desc">${sub.plan==='annual'?'Annual':'Monthly'} plan — ${sub.plan==='annual'?'S$69.90/year':'S$5.90/month'}</div>
       <div class="small-note">Manage or cancel any time using the button below (or via App Store / Google Play subscriptions, once MonIQ is live there).</div>
       <button class="pill-btn danger" id="cancelSubBtn" style="margin-top:14px;">Cancel Subscription</button>
     </div>`;
@@ -2233,7 +2234,7 @@ function renderTerms(){
       <strong style="color:var(--gold-bright);">5. User-Entered Financial Information.</strong> You retain ownership of information that you enter into the Service ("User Data"). You grant Avencia Private Limited a limited, non-exclusive licence to host, process, transmit, reproduce and otherwise use User Data solely as reasonably necessary to provide, maintain, secure and improve the Service and as otherwise described in our Privacy Policy. We do not acquire ownership of your financial records merely because you use the Service. You are responsible for ensuring that you have the right to enter or upload information into the Service.<br><br>
       <strong style="color:var(--gold-bright);">6. Data Backups and Data Loss.</strong> You are responsible for maintaining appropriate backups of your important information. Depending on the features you use, information may be stored primarily on your device or on our cloud infrastructure. Data may be lost as a result of, among other things:<br>&nbsp;&nbsp;• deleting or uninstalling the App;<br>&nbsp;&nbsp;• resetting or replacing your device;<br>&nbsp;&nbsp;• loss, theft or damage to your device;<br>&nbsp;&nbsp;• operating-system changes;<br>&nbsp;&nbsp;• deletion of local application or browser storage;<br>&nbsp;&nbsp;• failed synchronisation;<br>&nbsp;&nbsp;• software defects;<br>&nbsp;&nbsp;• corrupted data;<br>&nbsp;&nbsp;• service interruptions;<br>&nbsp;&nbsp;• third-party infrastructure failures;<br>&nbsp;&nbsp;• accidental deletion; or<br>&nbsp;&nbsp;• your own actions.<br>Where an export function is provided, you should periodically export important information and retain your own backup. We do not guarantee that any particular User Data will always be recoverable.<br><br>
       <strong style="color:var(--gold-bright);">7. Sharing.</strong> The Service may provide an optional family or group-sharing functionality ("Sharing"). Sharing is a feature of MonIQ and is separate from Apple's iCloud Family Sharing service unless expressly stated otherwise. If you enable Sharing:<br>&nbsp;&nbsp;• information you choose to share may become accessible to authorised members of your sharing group;<br>&nbsp;&nbsp;• you are responsible for selecting appropriate members;<br>&nbsp;&nbsp;• you should not share information with individuals you do not trust;<br>&nbsp;&nbsp;• removing a person from a group may not undo information that person has previously viewed, copied or otherwise obtained; and<br>&nbsp;&nbsp;• you remain responsible for information you choose to share.<br>Avencia Private Limited is not responsible for actions taken by members of your Sharing group.<br><br>
-      <strong style="color:var(--gold-bright);">8. Subscriptions and Free Trials.</strong> Certain features are available through paid subscriptions. The Service may offer a three-day free trial or another promotional trial period. Unless you cancel before the applicable trial period ends, the subscription will automatically renew and the applicable subscription price will be charged through the payment platform through which you subscribed. Current indicative subscription pricing is:<br>&nbsp;&nbsp;• S$9.90 per month; or<br>&nbsp;&nbsp;• S$100.90 per year.<br>Actual prices may vary by country, currency, taxes, promotional offers and the applicable App Store or payment platform.<br><br><u>Apple App Store subscriptions.</u> Where you purchase a subscription through Apple's App Store:<br>&nbsp;&nbsp;• payment is processed by Apple;<br>&nbsp;&nbsp;• subscription management is handled through your Apple Account;<br>&nbsp;&nbsp;• subscriptions automatically renew unless cancelled in accordance with Apple's procedures;<br>&nbsp;&nbsp;• deleting the App does not necessarily cancel your subscription;<br>&nbsp;&nbsp;• cancellation normally takes effect at the end of the current paid period; and<br>&nbsp;&nbsp;• refunds are subject to Apple's applicable terms and policies.<br><u>Google Play subscriptions.</u> Where subscriptions are offered through Google Play:<br>&nbsp;&nbsp;• payment and subscription management are handled by Google;<br>&nbsp;&nbsp;• automatic renewal applies unless cancelled in accordance with Google's procedures;<br>&nbsp;&nbsp;• deleting the App does not necessarily cancel your subscription; and<br>&nbsp;&nbsp;• refunds are subject to Google's applicable policies and applicable law.<br><u>Web / Stripe checkout.</u> Where MonIQ is not yet available on the App Store or Google Play in your region, subscriptions may instead be sold via our website through Stripe, our third-party payment processor; in that case payment and subscription management are handled by Stripe, and cancellation is available in-app or by contacting us. Where required by law, mandatory cancellation and refund rights will apply notwithstanding these Terms.<br><br>
+      <strong style="color:var(--gold-bright);">8. Subscriptions and Free Trials.</strong> Certain features are available through paid subscriptions. The Service may offer a three-day free trial or another promotional trial period. Unless you cancel before the applicable trial period ends, the subscription will automatically renew and the applicable subscription price will be charged through the payment platform through which you subscribed. Current indicative subscription pricing is:<br>&nbsp;&nbsp;• S$5.90 per month; or<br>&nbsp;&nbsp;• S$69.90 per year.<br>Actual prices may vary by country, currency, taxes, promotional offers and the applicable App Store or payment platform.<br><br><u>Apple App Store subscriptions.</u> Where you purchase a subscription through Apple's App Store:<br>&nbsp;&nbsp;• payment is processed by Apple;<br>&nbsp;&nbsp;• subscription management is handled through your Apple Account;<br>&nbsp;&nbsp;• subscriptions automatically renew unless cancelled in accordance with Apple's procedures;<br>&nbsp;&nbsp;• deleting the App does not necessarily cancel your subscription;<br>&nbsp;&nbsp;• cancellation normally takes effect at the end of the current paid period; and<br>&nbsp;&nbsp;• refunds are subject to Apple's applicable terms and policies.<br><u>Google Play subscriptions.</u> Where subscriptions are offered through Google Play:<br>&nbsp;&nbsp;• payment and subscription management are handled by Google;<br>&nbsp;&nbsp;• automatic renewal applies unless cancelled in accordance with Google's procedures;<br>&nbsp;&nbsp;• deleting the App does not necessarily cancel your subscription; and<br>&nbsp;&nbsp;• refunds are subject to Google's applicable policies and applicable law.<br><u>Web / Stripe checkout.</u> Where MonIQ is not yet available on the App Store or Google Play in your region, subscriptions may instead be sold via our website through Stripe, our third-party payment processor; in that case payment and subscription management are handled by Stripe, and cancellation is available in-app or by contacting us. Where required by law, mandatory cancellation and refund rights will apply notwithstanding these Terms.<br><br>
       <strong style="color:var(--gold-bright);">9. Changes to Prices.</strong> We may change subscription prices from time to time. Where required, we will provide advance notice of a price change and obtain any required consent. A price change will not retrospectively alter amounts already paid.<br><br>
       <strong style="color:var(--gold-bright);">10. Refunds.</strong> Except where applicable law provides otherwise, purchases made through Apple, Google, Stripe or another payment platform are subject to that platform's applicable refund policies. Nothing in these Terms removes any mandatory statutory refund or consumer rights applicable to you.<br><br>
       <strong style="color:var(--gold-bright);">11. Third-Party Services.</strong> The Service may depend upon third-party services, including hosting providers, payment providers, app stores, authentication providers, cloud infrastructure providers, AI providers and other service providers. Third-party services may:<br>&nbsp;&nbsp;• become unavailable;<br>&nbsp;&nbsp;• change their functionality;<br>&nbsp;&nbsp;• experience outages;<br>&nbsp;&nbsp;• change their terms;<br>&nbsp;&nbsp;• impose usage limits; or<br>&nbsp;&nbsp;• cease supporting particular functionality.<br>Avencia Private Limited does not guarantee the availability or performance of third-party services. Your use of a third-party service may also be subject to that provider's separate terms and privacy policy.<br><br>
