@@ -350,7 +350,7 @@ function isEntitled(){
 // before paying) stay open regardless of subscription status; the billing tabs themselves
 // (Trial/Pricing/Checkout) and the legal pages are separate ui.tab states reached only via buttons —
 // never part of GATED_TABS since they're how a locked-out user actually subscribes.
-const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data','settings']);
+const GATED_TABS = new Set(['add','overview','transactions','categories','bills','networth','reports','account','data','settings','askai']);
 
 /* ============================= REVENUECAT (native purchases) =============================
    RevenueCat wraps StoreKit (iOS) / Play Billing (Android) and validates receipts against its own
@@ -760,6 +760,205 @@ function subscribeRealtime(){
   }catch(e){ console.warn('realtime subscribe failed: ' + errMsg(e)); }
 }
 
+/* ============================= AI CHAT ============================= */
+// Two modes:
+//  - 'included': calls our Supabase Edge Function (ai-chat), which holds the shared
+//    Anthropic key server-side and enforces a monthly per-user question cap. Requires
+//    being signed in (same account used for Sharing) since the cap is tied to a user id.
+//  - 'byok': calls Anthropic directly from the device using the user's own API key —
+//    unlimited, but the user pays Anthropic directly and manages their own key.
+const AI_CONFIG_KEY = 'ai-config';
+const AI_CONSENT_KEY = 'ai-consent-given';
+
+let aiChat = {
+  mode: 'included',
+  byokKey: '',
+  messages: [],       // {role:'user'|'assistant', content} — session only, not persisted
+  loading: false,
+  error: null,
+  remaining: null,    // included questions left this month, once known from the server
+  cap: null,
+  consentGiven: false,
+};
+
+async function loadAIConfig(){
+  try{
+    const cfg = await idbGet(AI_CONFIG_KEY);
+    if(cfg){ aiChat.mode = cfg.mode || 'included'; aiChat.byokKey = cfg.byokKey || ''; }
+  }catch(e){ /* not saved yet, defaults are fine */ }
+  try{
+    const consent = await idbGet(AI_CONSENT_KEY);
+    aiChat.consentGiven = consent === true;
+  }catch(e){ /* not saved yet */ }
+}
+async function saveAIConfig(){
+  try{ await idbSet(AI_CONFIG_KEY, { mode: aiChat.mode, byokKey: aiChat.byokKey }); }
+  catch(e){ flashToast('Could not save AI settings: ' + errMsg(e)); }
+}
+async function recordAIConsent(){
+  aiChat.consentGiven = true;
+  try{ await idbSet(AI_CONSENT_KEY, true); }catch(e){ /* non-fatal */ }
+}
+
+function buildFinancialSummaryForAI(){
+  const month = CUR_MONTH;
+  const cats = STATE.monthCats[month] || { income: [], expense: [] };
+  const t = totalsForMonth(month);
+  const overBudget = cats.expense.filter(c => {
+    const spent = STATE.transactions
+      .filter(tx => tx.date.slice(0,7) === month && tx.type === 'expense' && tx.categoryId === c.id)
+      .reduce((s,tx) => s + txnAmt(tx), 0);
+    return c.planned > 0 && spent > c.planned;
+  }).map(c => c.name);
+  const netWorthTotal = (STATE.netWorth.accounts || []).reduce((s,a) => s + (a.type === 'liability' ? -a.balance : a.balance), 0);
+  const unpaidBills = (STATE.bills || []).filter(b => !isBillPaidThisMonth(b)).map(b => `${b.name} (${fmt(b.amount)})`);
+  const y = ytdSavings(STATE.goal.year);
+
+  return [
+    `Savings goal: ${fmt(STATE.goal.amount)} by the end of the year.`,
+    `Year-to-date: income ${fmt(y.income)}, expenses ${fmt(y.expense)}, net ${fmt(y.net)} (${STATE.goal.amount>0 ? ((y.net/STATE.goal.amount)*100).toFixed(1) : 0}% of goal).`,
+    `This month (${month}): income ${fmt(t.income)}, expenses ${fmt(t.expense)}.`,
+    `Expense categories this month: ${cats.expense.map(c => `${c.name} (budget ${fmt(c.planned)})`).join(', ') || 'none set'}.`,
+    overBudget.length ? `Over budget this month: ${overBudget.join(', ')}.` : `No categories are over budget this month.`,
+    `Net worth: ${fmt(netWorthTotal)}.`,
+    unpaidBills.length ? `Unpaid bills: ${unpaidBills.join(', ')}.` : `No unpaid bills.`,
+  ].join('\n');
+}
+
+async function sendAIChatMessage(question){
+  if(!question || !question.trim()) return;
+  if(!aiChat.consentGiven){ render(); return; }
+  const q = question.trim();
+  aiChat.messages.push({ role: 'user', content: q });
+  aiChat.loading = true; aiChat.error = null;
+  render();
+
+  try{
+    if(aiChat.mode === 'byok'){
+      if(!aiChat.byokKey){ throw new Error('Add your own Anthropic API key in Settings → AI, or switch to included questions.'); }
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': aiChat.byokKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-5',
+          max_tokens: 800,
+          system: 'You are a helpful, concise financial assistant inside the MonIQ budgeting app. Answer using only the data below. Keep answers short.\n\n' + buildFinancialSummaryForAI(),
+          messages: [{ role: 'user', content: q }],
+        }),
+      });
+      if(!res.ok){
+        let msg = 'HTTP ' + res.status;
+        try{ const errData = await res.json(); if(errData?.error?.message) msg = errData.error.message; }catch(e){}
+        if(res.status === 401) msg = 'Your API key was rejected — check it in Settings → AI.';
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      const textBlock = (data.content || []).find(b => b.type === 'text');
+      aiChat.messages.push({ role: 'assistant', content: textBlock ? textBlock.text : "I couldn't generate a response." });
+    }else{
+      if(!cloud.configured || !cloud.authed){
+        throw new Error('Sign in first (Sharing tab) to use your included monthly AI questions, or switch to your own API key in Settings → AI.');
+      }
+      const { data: sessionData } = await supaClient.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if(!token) throw new Error('Your session expired — sign in again from the Sharing tab.');
+
+      const res = await fetch(`${cloud.url}/functions/v1/ai-chat`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ question: q, financialSummary: buildFinancialSummaryForAI() }),
+      });
+      const data = await res.json();
+      if(res.status === 429){
+        aiChat.remaining = 0; aiChat.cap = data.limit;
+        throw new Error(data.message || 'Monthly AI question limit reached.');
+      }
+      if(!res.ok){ throw new Error(data.error || ('HTTP ' + res.status)); }
+      aiChat.messages.push({ role: 'assistant', content: data.answer });
+      aiChat.cap = data.limit;
+      aiChat.remaining = Math.max(0, data.limit - data.currentCount);
+    }
+  }catch(e){
+    if(e instanceof TypeError){
+      aiChat.error = "Couldn't reach the server — check your internet connection.";
+    }else{
+      aiChat.error = errMsg(e);
+    }
+  }
+  aiChat.loading = false;
+  render();
+}
+
+// AI chat mic — same native/browser branching as the Add Entry mic, but writes the
+// transcript into the chat input instead of parsing it as a transaction.
+let aiRecognition = null;
+async function toggleAIVoiceInput(){
+  if(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()){
+    return toggleNativeAIVoiceInput();
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ flashToast('Voice input is not supported in this browser. Try Chrome or Safari.'); return; }
+  if(window.isSecureContext === false){
+    flashToast("Voice input needs a secure (https) connection — it won't work when this file is opened directly.");
+    return;
+  }
+  if(isIOSStandalonePWA()){
+    flashToast("Voice input has a known Apple/Safari bug when this app is added to your Home Screen — open this app's link in Safari instead, or type your question.");
+    return;
+  }
+  if(ui.aiListening){ if(aiRecognition) aiRecognition.stop(); return; }
+  if(aiRecognition){ try{ aiRecognition.abort(); }catch(e){} }
+
+  aiRecognition = new SR();
+  aiRecognition.lang = 'en-US';
+  aiRecognition.interimResults = false;
+  aiRecognition.maxAlternatives = 1;
+  aiRecognition.onstart = () => { ui.aiListening = true; render(); };
+  aiRecognition.onend = () => { ui.aiListening = false; render(); };
+  aiRecognition.onerror = (event) => {
+    ui.aiListening = false;
+    const msg = voiceErrorMessage(event && event.error);
+    if(msg) flashToast(msg);
+    render();
+  };
+  aiRecognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    const input = document.getElementById('aiChatInput');
+    if(input) input.value = transcript;
+  };
+  try{ aiRecognition.start(); }
+  catch(e){ ui.aiListening = false; flashToast('Could not start voice input — try again.'); render(); }
+}
+
+async function toggleNativeAIVoiceInput(){
+  const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.SpeechRecognition;
+  if(!plugin){ flashToast('Voice input plugin not available in this build.'); return; }
+  if(ui.aiListening){ try{ await plugin.stop(); }catch(e){} ui.aiListening = false; render(); return; }
+  try{
+    const avail = await plugin.available();
+    if(!avail || !avail.available){ flashToast('Voice input is not available on this device.'); return; }
+    const perm = await plugin.requestPermissions();
+    const granted = perm && perm.speechRecognition === 'granted';
+    if(!granted){ flashToast('Microphone/speech permission was denied.'); return; }
+    ui.aiListening = true; render();
+    const result = await plugin.start({ language: 'en-US', maxResults: 1, partialResults: false, popup: false });
+    ui.aiListening = false;
+    const transcript = result && result.matches && result.matches[0];
+    if(transcript){ const input = document.getElementById('aiChatInput'); if(input) input.value = transcript; }
+    else flashToast("Didn't catch any speech — try again.");
+    render();
+  }catch(e){
+    ui.aiListening = false;
+    flashToast('Voice input failed: ' + errMsg(e));
+    render();
+  }
+}
+
 
 /* ============================= BILLS / RECURRING PAYMENTS ============================= */
 function daysUntilDue(dueDay){
@@ -972,6 +1171,7 @@ let ui = {
   selectedPlan: 'annual',    // 'monthly' | 'annual' — chosen on Trial or Pricing tab
   trialFlow: false,          // true if the checkout was reached via "Try Free For 3 Days"
   listening: false,
+  aiListening: false,
   lastAddedId: null,
   showOnboarding: false,
   onboardingStep: 0,
@@ -1105,6 +1305,7 @@ function renderTabs(){
     ['overview','Overview'],
     ['categories','Categories'],
     ['transactions','Transactions'],
+    ['askai','Ask AI'],
     ['bills','Bills'],
     ['networth','Net Worth'],
     ['reports','Reports'],
@@ -1125,6 +1326,7 @@ function renderTabContent(){
   if(ui.tab === 'overview') return renderOverview();
   if(ui.tab === 'add') return renderAdd();
   if(ui.tab === 'transactions') return renderTransactions();
+  if(ui.tab === 'askai') return renderAskAI();
   if(ui.tab === 'categories') return renderCategories();
   if(ui.tab === 'bills') return renderBills();
   if(ui.tab === 'networth') return renderNetWorth();
@@ -1143,7 +1345,7 @@ function renderTabContent(){
 const GATED_TAB_LABELS = {
   add: 'Add Entry', overview: 'Overview', transactions: 'Transactions', categories: 'Categories',
   bills: 'Bills', networth: 'Net Worth', reports: 'Reports', account: 'Sharing', data: 'Data',
-  settings: 'Settings',
+  settings: 'Settings', askai: 'Ask AI',
 };
 function renderPaywall(){
   const label = GATED_TAB_LABELS[ui.tab] || 'This feature';
@@ -1708,6 +1910,53 @@ function nativePlatform(){
 function isNativeIOSApp(){ return nativePlatform() === 'ios'; }
 function isNativeApp(){ return !!nativePlatform(); }
 
+/* ============================= ASK AI TAB ============================= */
+function renderAskAI(){
+  if(!aiChat.consentGiven){
+    return `
+    <div class="card">
+      <h2>Before You Ask AI</h2>
+      <div class="card-desc">One-time notice — quick read.</div>
+      <div class="small-note" style="line-height:1.6; margin-bottom:16px;">
+        Ask AI answers questions about your finances using your data — your savings goal and progress, this month's budgets and spending, categories over budget, net worth, and unpaid bills.<br><br>
+        <strong style="color:var(--gold-bright);">Included questions</strong> (default): your question and that summary are sent to MonIQ's server, which forwards them to Anthropic to generate a response, then discards them — nothing is stored. This uses the AI Insights add-on's monthly question allowance; going over it just pauses AI answers until next month, it doesn't charge you more automatically.<br><br>
+        <strong style="color:var(--gold-bright);">Your own API key</strong> (optional, in Settings → AI): sent directly from your device to Anthropic, never through MonIQ's server, billed to your own Anthropic account, unlimited.
+      </div>
+      <button class="btn-primary" id="aiConsentAcceptBtn">Got It, Continue</button>
+    </div>`;
+  }
+
+  const usageLine = aiChat.mode === 'included'
+    ? (aiChat.remaining !== null
+        ? `${aiChat.remaining} of ${aiChat.cap} included questions left this month`
+        : (cloud.authed ? 'Included questions — sign in confirmed' : 'Sign in via the Sharing tab to use included questions'))
+    : 'Using your own API key — unlimited';
+
+  return `
+  <div class="card">
+    <h2>Ask AI</h2>
+    <div class="card-desc">${escapeHtml(usageLine)}</div>
+    <div class="small-note" style="margin-bottom:10px;">
+      <a href="#" data-action="goToTab" data-tab="settings" data-anchor="aiAssistantSection" style="color:var(--gold-bright); text-decoration:underline;">Change AI mode in Settings</a>
+    </div>
+    <div class="ai-chat-window" id="aiChatWindow">
+      ${aiChat.messages.length === 0 ? `<div class="empty-state">Ask something like "Am I over budget this month?" or "How close am I to my goal?"</div>` : ''}
+      ${aiChat.messages.map(m => `
+        <div class="ai-msg ${m.role}">
+          <div class="ai-msg-body">${escapeHtml(m.content)}</div>
+        </div>
+      `).join('')}
+      ${aiChat.loading ? `<div class="ai-msg assistant"><div class="ai-msg-body">…</div></div>` : ''}
+    </div>
+    ${aiChat.error ? `<div class="empty-state" style="color:var(--rust-bright);">${escapeHtml(aiChat.error)}</div>` : ''}
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+      <button class="mic-btn ${ui.aiListening?'listening':''}" id="aiMicBtn" title="Speak your question">${micIconSvg()}</button>
+      <input type="text" id="aiChatInput" placeholder="Ask about your finances..." style="flex:1;">
+      <button class="btn-primary" id="aiChatSendBtn" ${aiChat.loading?'disabled':''}>Ask</button>
+    </div>
+  </div>`;
+}
+
 /* ============================= CATEGORIES TAB ============================= */
 function renderCategories(){
   const month = ui.entryMonth;
@@ -2049,6 +2298,27 @@ function renderSettings(){
     <button class="pill-btn" id="saveStripeLinksBtn">Save Payment Links</button>
   </div>
 
+  <div class="card" id="aiAssistantSection">
+    <h2>AI Assistant</h2>
+    <div class="card-desc">Powers the Ask AI tab.</div>
+    <div class="small-note" style="margin-bottom:14px; line-height:1.6;">
+      <strong style="color:var(--gold-bright);">Included questions</strong> (default) — 40 questions/month via the AI Insights add-on (S$4.90/mo, Pricing tab), sent through MonIQ's server and not stored afterward. Requires being signed in (Sharing tab).<br><br>
+      <strong style="color:var(--gold-bright);">Your own API key</strong> — unlimited use, billed to your own Anthropic account, sent directly from your device with nothing passing through MonIQ's server. Get a key at <strong style="color:var(--gold-bright);">console.anthropic.com</strong>.
+    </div>
+    <div class="field">
+      <label>Mode</label>
+      <select id="aiModeSelect">
+        <option value="included" ${aiChat.mode==='included'?'selected':''}>Included questions (sign-in required)</option>
+        <option value="byok" ${aiChat.mode==='byok'?'selected':''}>My own API key (unlimited)</option>
+      </select>
+    </div>
+    <div class="field" id="aiByokKeyField" style="${aiChat.mode==='byok'?'':'display:none;'}">
+      <label>Anthropic API Key</label>
+      <input type="password" id="aiByokKeyInput" value="${escapeHtml(aiChat.byokKey||'')}" placeholder="sk-ant-...">
+    </div>
+    <button class="pill-btn solid" id="saveAIConfigBtn">Save AI Settings</button>
+  </div>
+
   <div class="card">
     <h2>Household &amp; Shared Access</h2>
     <div class="card-desc">Tag entries by household member, and combine two people's logs periodically.</div>
@@ -2131,6 +2401,11 @@ function renderPricing(){
       <div class="small-note">Billed once a year, cancel any time.</div>
       <button class="pill-btn solid" data-action="selectPlanFromPricing" data-plan="annual" style="margin-top:18px; width:100%;">Select Annual</button>
     </div>
+  </div>
+  <div class="card" style="text-align:center; border-color:var(--hairline-strong);">
+    <div style="font-family:'Cormorant Garamond', serif; font-size:14px; text-transform:uppercase; letter-spacing:0.15em; color:var(--gold-bright);">AI Insights Add-On</div>
+    <div style="font-family:'Cormorant Garamond', serif; font-size:32px; color:var(--gold-bright); font-weight:700; margin:10px 0;">+S$4.90<span style="font-size:14px; color:var(--muted);">/mo</span></div>
+    <div class="small-note">Adds 40 Ask AI questions per month on top of either plan above — ask things like "Am I over budget?" or "How close am I to my goal?" Turn it on any time from Settings → AI Assistant. Need more than 40/month? Use your own Anthropic API key instead for unlimited use, billed directly to your own account, at no extra charge from MonIQ.</div>
   </div>
   <div class="card" style="text-align:center;">
     <div class="small-note">
@@ -2255,7 +2530,8 @@ function renderTerms(){
       <strong style="color:var(--gold-bright);">26. No Waiver.</strong> Our failure to enforce any provision of these Terms does not constitute a waiver of our right to enforce that provision later.<br><br>
       <strong style="color:var(--gold-bright);">27. Entire Agreement.</strong> These Terms, together with the Privacy Policy and any additional terms expressly incorporated into the Service, constitute the agreement between you and Avencia concerning your use of the Service.<br><br>
       <strong style="color:var(--gold-bright);">28. Assignment.</strong> You may not assign or transfer your rights under these Terms without our prior written consent, except where prohibited by applicable law. Avencia Private Limited may assign or transfer these Terms in connection with a merger, acquisition, corporate restructuring, sale of assets or similar transaction, provided that applicable legal requirements are satisfied.<br><br>
-      <strong style="color:var(--gold-bright);">29. Contact.</strong><br>
+      <strong style="color:var(--gold-bright);">29. Artificial Intelligence Features.</strong> The Service may include an optional "Ask AI" feature (the "AI Feature"). The AI Feature is provided for informational and organisational purposes only and should not be treated as professional advice — see Section 2. AI-generated responses may be inaccurate, incomplete, outdated or misleading; do not rely on them as the sole basis for a financial, investment, tax, legal, or other consequential decision.<br><br>The AI Feature has two modes:<br>&nbsp;&nbsp;• <u>Included questions</u> — a limited number of questions per month, included with the optional AI Insights add-on. Your question and a summary of your financial data are sent to our server, which forwards them to our AI provider (Anthropic) to generate a response, then discards them. Requires being signed in.<br>&nbsp;&nbsp;• <u>Your own API key</u> — you supply your own Anthropic API key, and requests go directly from your device to Anthropic without passing through our servers. You are responsible for maintaining that key and for any charges Anthropic bills to your own account; we do not pay those charges on your behalf and do not guarantee Anthropic's availability or performance.<br><br>You must not provide an API key you do not have permission to use. Where you use the included-questions mode, Anthropic acts as our sub-processor for that request only, as described in our Privacy Policy.<br><br>
+      <strong style="color:var(--gold-bright);">30. Contact.</strong><br>
       Avencia Private Limited<br>
       Singapore<br><br>
       Terms of Service enquiries: [legal/terms email]<br>
@@ -2284,7 +2560,7 @@ function renderPrivacy(){
       <strong style="color:var(--gold-bright);">7. How We Use Personal Information.</strong> We process information for purposes including:<br><br><u>Providing the Service</u><br>&nbsp;&nbsp;• budgeting;<br>&nbsp;&nbsp;• spending tracking;<br>&nbsp;&nbsp;• calculations;<br>&nbsp;&nbsp;• categorisation;<br>&nbsp;&nbsp;• reporting;<br>&nbsp;&nbsp;• savings goals;<br>&nbsp;&nbsp;• bill tracking;<br>&nbsp;&nbsp;• account management;<br>&nbsp;&nbsp;• synchronisation; and<br>&nbsp;&nbsp;• other requested functionality.<br><br><u>Security</u><br>&nbsp;&nbsp;• authentication;<br>&nbsp;&nbsp;• fraud prevention;<br>&nbsp;&nbsp;• abuse prevention;<br>&nbsp;&nbsp;• detecting unauthorised access;<br>&nbsp;&nbsp;• investigating security incidents; and<br>&nbsp;&nbsp;• protecting our users and systems.<br><br><u>Customer support</u> — we may process information you provide when contacting us to investigate and respond to your request.<br><br><u>Payments and subscriptions</u> — we process subscription and transaction information necessary to establish and maintain your subscription.<br><br><u>Legal compliance</u> — we may process and retain information where reasonably necessary to comply with applicable laws, regulations, legal proceedings or lawful government requests.<br><br><u>Service improvement</u> — we may use aggregated, de-identified or otherwise appropriately protected information to understand system performance, diagnose errors and improve the Service.<br><br>We do not use your financial information to create advertising profiles.<br><br>
       <strong style="color:var(--gold-bright);">8. Legal Bases — European Economic Area and United Kingdom.</strong> Where GDPR or UK GDPR applies, we rely on applicable legal bases including:<br><br><u>Performance of a contract</u> — where processing is necessary to provide the Service you requested.<br><br><u>Consent</u> — where applicable law requires consent, including for certain optional functionality. You may withdraw consent at any time where the relevant processing is based on consent. Withdrawal does not affect processing that occurred lawfully before withdrawal.<br><br><u>Legitimate interests</u> — where reasonably necessary for purposes such as:<br>&nbsp;&nbsp;• security;<br>&nbsp;&nbsp;• fraud prevention;<br>&nbsp;&nbsp;• service integrity;<br>&nbsp;&nbsp;• customer support;<br>&nbsp;&nbsp;• preventing misuse; and<br>&nbsp;&nbsp;• improving the Service.<br>Where we rely on legitimate interests, we consider the impact on your rights and freedoms.<br><br><u>Legal obligations</u> — where processing is necessary to comply with applicable legal requirements.<br><br>
       <strong style="color:var(--gold-bright);">9. How We Share Information.</strong> We do not sell your personal information. We may disclose personal information to service providers where reasonably necessary to provide the Service. These may include:<br>&nbsp;&nbsp;• cloud hosting providers;<br>&nbsp;&nbsp;• database providers;<br>&nbsp;&nbsp;• authentication providers;<br>&nbsp;&nbsp;• payment processors;<br>&nbsp;&nbsp;• Apple;<br>&nbsp;&nbsp;• Google;<br>&nbsp;&nbsp;• AI providers;<br>&nbsp;&nbsp;• email providers;<br>&nbsp;&nbsp;• security providers;<br>&nbsp;&nbsp;• technical support providers; and<br>&nbsp;&nbsp;• professional advisers.<br>Service providers are expected to process information only as necessary to provide their services to us, subject to applicable contractual and legal requirements.<br><br>
-      <strong style="color:var(--gold-bright);">10. Third-Party Services.</strong> Depending on the features and distribution channels you use, third-party services may include:<br><br><u>Apple</u> — Apple may process information associated with App Store downloads, subscriptions and payments according to Apple's own terms and privacy practices.<br><br><u>Google</u> — Google may process information associated with Google Play distribution and subscriptions according to Google's own terms and privacy practices.<br><br><u>Supabase</u> — where Sharing or cloud synchronisation is enabled, information may be hosted using Supabase or another cloud infrastructure provider selected by Avencia.<br><br><u>Stripe</u> — where web-based payments are offered, payment processing may be provided by Stripe. Avencia does not intentionally store complete payment-card numbers where payment is processed directly by the applicable payment provider.<br><br>Third-party providers maintain their own privacy policies and terms.<br><br>
+      <strong style="color:var(--gold-bright);">10. Third-Party Services.</strong> Depending on the features and distribution channels you use, third-party services may include:<br><br><u>Apple</u> — Apple may process information associated with App Store downloads, subscriptions and payments according to Apple's own terms and privacy practices.<br><br><u>Google</u> — Google may process information associated with Google Play distribution and subscriptions according to Google's own terms and privacy practices.<br><br><u>Supabase</u> — where Sharing or cloud synchronisation is enabled, information may be hosted using Supabase or another cloud infrastructure provider selected by Avencia.<br><br><u>Stripe</u> — where web-based payments are offered, payment processing may be provided by Stripe. Avencia does not intentionally store complete payment-card numbers where payment is processed directly by the applicable payment provider.<br><br><u>Anthropic</u> — where the AI Assistant is used, information may be transmitted to Anthropic as described in this Privacy Policy. Where you use your own API key and the App connects directly to Anthropic, that relationship is directly between you and Anthropic for that API transaction.<br><br>Third-party providers maintain their own privacy policies and terms.<br><br>
       <strong style="color:var(--gold-bright);">11. Payment Information.</strong> For App Store or Google Play purchases, payment processing is performed by the applicable platform. Avencia generally receives subscription-related information such as:<br>&nbsp;&nbsp;• subscription status;<br>&nbsp;&nbsp;• product purchased;<br>&nbsp;&nbsp;• transaction identifier;<br>&nbsp;&nbsp;• renewal status; and<br>&nbsp;&nbsp;• relevant billing information.<br>We do not intentionally receive or store your complete payment-card number from Apple or Google. Where Stripe is used for web payments, Stripe processes payment information in accordance with its own terms and privacy policy.<br><br>
       <strong style="color:var(--gold-bright);">12. Data Storage.</strong> Depending on the features you use, your information may be stored:<br>&nbsp;&nbsp;• locally on your device; and/or<br>&nbsp;&nbsp;• on cloud infrastructure used by Avencia.<br>Where cloud storage is used, we implement commercially reasonable technical and organisational safeguards appropriate to the information being processed. These may include:<br>&nbsp;&nbsp;• encryption in transit;<br>&nbsp;&nbsp;• access controls;<br>&nbsp;&nbsp;• authentication;<br>&nbsp;&nbsp;• database access restrictions;<br>&nbsp;&nbsp;• security monitoring; and<br>&nbsp;&nbsp;• appropriate infrastructure security controls.<br>No method of electronic storage or transmission is completely secure. Accordingly, we cannot guarantee absolute security.<br><br>
       <strong style="color:var(--gold-bright);">13. Data Retention.</strong> We retain personal information only for as long as reasonably necessary for the purposes described in this Privacy Policy, unless a longer period is required or permitted by law. Retention periods vary depending on:<br>&nbsp;&nbsp;• the type of information;<br>&nbsp;&nbsp;• the feature involved;<br>&nbsp;&nbsp;• whether your account remains active;<br>&nbsp;&nbsp;• legal and regulatory requirements;<br>&nbsp;&nbsp;• security requirements; and<br>&nbsp;&nbsp;• legitimate business requirements.<br><u>Local information</u> — information stored solely on your device may remain there until you delete it, uninstall the App, clear applicable storage, or use the in-app <strong>Delete All My Data</strong> function (Data tab). Avencia may have no ability to recover locally stored information once deleted.<br><br><u>Cloud information</u> — where cloud storage is used, information may be retained while your account or sharing arrangement remains active. When an account is deleted, we will take reasonable steps to delete or anonymise applicable information, subject to:<br>&nbsp;&nbsp;• legal retention requirements;<br>&nbsp;&nbsp;• security records;<br>&nbsp;&nbsp;• dispute resolution;<br>&nbsp;&nbsp;• fraud prevention; and<br>&nbsp;&nbsp;• technical backup cycles.<br>Deleted information may remain temporarily in encrypted backups before being overwritten in accordance with our backup procedures.<br><br><u>Support records</u> — support communications may be retained for a reasonable period to resolve issues, maintain service records and comply with applicable obligations.<br><br>
@@ -2303,14 +2579,15 @@ function renderPrivacy(){
       <strong style="color:var(--gold-bright);">26. Your Responsibility When Sharing Information.</strong> If you use Sharing or another sharing feature, you are responsible for deciding what information to share. Information shared with another person may be copied, retained or disclosed by that person. Removing a person from a sharing group does not guarantee that the person has deleted information they previously accessed.<br><br>
       <strong style="color:var(--gold-bright);">27. Third-Party Websites and Services.</strong> The Service may contain links or integrations to third-party services. We do not control third-party privacy practices. Your use of a third-party service is governed by that provider's own terms and privacy policy.<br><br>
       <strong style="color:var(--gold-bright);">28. Changes to This Privacy Policy.</strong> We may update this Privacy Policy from time to time. When changes are material, we will provide notice appropriate to the nature of the change and applicable legal requirements. Where applicable law requires renewed consent for a new processing activity, we will obtain that consent before commencing the relevant processing. The updated Policy will identify its effective date.<br><br>
-      <strong style="color:var(--gold-bright);">29. Contact Us.</strong> For privacy questions, data-access requests, correction requests, deletion requests or other privacy matters:<br><br>
+      <strong style="color:var(--gold-bright);">29. AI Assistant.</strong> If you voluntarily enable and use the AI Assistant, the information necessary to answer your request may be sent to our AI provider (Anthropic). Depending on the feature you use, this may include: your question; budget information; category names and amounts; actual spending; savings goals and progress; bill information; and net-worth totals. The App is designed to minimise this to what is reasonably necessary for the requested functionality.<br><br>The AI Assistant has two modes with different data handling:<br>&nbsp;&nbsp;• <u>Included questions</u> (requires sign-in) — your question and financial summary are sent to our server, which forwards them to Anthropic and returns the response; we do not store the question, the summary, or the response — the only thing retained is a monthly question count tied to your account, used solely to enforce the plan's usage limit.<br>&nbsp;&nbsp;• <u>Your own API key</u> — your device communicates directly with Anthropic; that request does not pass through or become stored on our servers at all.<br><br>You should review Anthropic's own privacy policy and terms before using this feature. We do not use your financial information to train or develop general-purpose AI models, and AI-generated responses are not intended to make legally binding or high-impact decisions about you.<br><br>
+      <strong style="color:var(--gold-bright);">30. Contact Us.</strong> For privacy questions, data-access requests, correction requests, deletion requests or other privacy matters:<br><br>
       Avencia Private Limited<br>
       Singapore<br><br>
       Privacy / Data Protection Contact: [name / title]<br>
       Email: [privacy email]<br>
       Registered Office: [registered office address]<br><br>
       If you are in Singapore and remain dissatisfied after contacting us, you may have the right to raise the matter with the Personal Data Protection Commission. If you are in the EEA or UK, you may have the right to lodge a complaint with the relevant data protection supervisory authority.<br><br>
-      <strong style="color:var(--gold-bright);">30. Important Notice.</strong> This Privacy Policy describes our intended privacy practices but does not override mandatory privacy rights or obligations applicable to you under the law of your jurisdiction. Where local law provides stronger privacy protections than those described here, those mandatory protections will apply.<br><br>
+      <strong style="color:var(--gold-bright);">31. Important Notice.</strong> This Privacy Policy describes our intended privacy practices but does not override mandatory privacy rights or obligations applicable to you under the law of your jurisdiction. Where local law provides stronger privacy protections than those described here, those mandatory protections will apply.<br><br>
       <em>Last Updated: [date]</em>
     </div>
   </div>`;
@@ -2512,6 +2789,27 @@ function attachGlobalHandlers(){
     });
     const micBtn = document.getElementById('micBtn');
     if(micBtn) micBtn.addEventListener('click', toggleVoiceInput);
+  }
+
+  if(ui.tab === 'askai'){
+    const consentBtn = document.getElementById('aiConsentAcceptBtn');
+    if(consentBtn) consentBtn.addEventListener('click', async () => { await recordAIConsent(); render(); });
+    const sendBtn = document.getElementById('aiChatSendBtn');
+    const chatInput = document.getElementById('aiChatInput');
+    if(sendBtn && chatInput) sendBtn.addEventListener('click', () => {
+      const q = chatInput.value; chatInput.value = '';
+      sendAIChatMessage(q);
+    });
+    if(chatInput) chatInput.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' && !aiChat.loading){
+        const q = chatInput.value; chatInput.value = '';
+        sendAIChatMessage(q);
+      }
+    });
+    const chatWindow = document.getElementById('aiChatWindow');
+    if(chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+    const aiMicBtn = document.getElementById('aiMicBtn');
+    if(aiMicBtn) aiMicBtn.addEventListener('click', toggleAIVoiceInput);
   }
 
   // deleteTxn can appear on both the Add Entry (recent list) and Transactions tabs
@@ -2735,6 +3033,20 @@ function attachGlobalHandlers(){
       STATE.settings.stripeLinks.annual = document.getElementById('stripeLinkAnnual').value.trim();
       persist();
       flashToast('Payment links saved.');
+      render();
+    });
+    const aiModeSelect = document.getElementById('aiModeSelect');
+    if(aiModeSelect) aiModeSelect.addEventListener('change', e => {
+      const byokField = document.getElementById('aiByokKeyField');
+      if(byokField) byokField.style.display = e.target.value === 'byok' ? '' : 'none';
+    });
+    const saveAIConfigBtn = document.getElementById('saveAIConfigBtn');
+    if(saveAIConfigBtn) saveAIConfigBtn.addEventListener('click', async () => {
+      aiChat.mode = document.getElementById('aiModeSelect').value;
+      const byokInput = document.getElementById('aiByokKeyInput');
+      if(byokInput) aiChat.byokKey = byokInput.value.trim();
+      await saveAIConfig();
+      flashToast('AI settings saved.');
       render();
     });
     const settingsManageNativeSubBtn = document.getElementById('settingsManageNativeSubBtn');
@@ -3092,6 +3404,7 @@ function handleVoiceTranscript(transcript){
 
 /* ============================= INIT ============================= */
 loadCloudConfig();
+loadAIConfig();
 (async () => {
   await loadState(); // must finish first — it replaces STATE wholesale, and RC needs the real saved API keys, not the defaults
   await initRevenueCat();

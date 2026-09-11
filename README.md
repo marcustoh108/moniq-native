@@ -14,12 +14,39 @@ app yet — a few things still need real hardware/accounts that can't be provide
   not something fixable in JavaScript alone
 - Microphone/speech permission descriptions added to `ios/App/App/Info.plist`
 - `RECORD_AUDIO` and `INTERNET` permissions added to `android/app/src/main/AndroidManifest.xml`
-- Every screen except Intro/Demo/Settings/Trial/Pricing/Checkout/Terms/Privacy now requires an active
-  trial or subscription to use — real enforcement, not just the pricing copy
+- Every screen except Intro, Demo ("See It In Action"), Trial, Pricing, Checkout, Terms, and Privacy
+  now requires an active trial or subscription to use — real enforcement, not just the pricing copy
 - Real subscription verification wired up via **RevenueCat** (`@revenuecat/purchases-capacitor`) for
   the native iOS/Android app — it wraps Apple's / Google's own purchase system and validates the
   result server-side, so it can't be spoofed by editing the app's local data the way the old
   local-only "preview" buttons could be. See "Connect RevenueCat" below to activate it.
+- A capped "Ask AI" feature — see "AI Insights feature" below, since this needs one extra step.
+
+## AI Insights feature — one-time deployment step
+The app has a capped, server-side "Ask AI" feature (in the app's Ask AI tab). This needs a Supabase
+Edge Function and a secret API key deployed before the "included questions" mode works — it's included
+in this project but not yet live.
+
+1. Run the full contents of `household-schema.sql` in your Supabase project's SQL Editor (safe to
+   re-run if you've already run an earlier version — it uses `if not exists` / `create or replace` and
+   won't touch existing data; this version adds the `ai_usage` table and `increment_ai_usage()` function
+   the AI feature needs, on top of the existing household-sharing schema).
+2. Install the Supabase CLI if needed (`npm install -g supabase`), then from this project folder:
+   ```
+   supabase login
+   supabase link --project-ref YOUR_PROJECT_REF   # find this in your Supabase project URL
+   supabase functions deploy ai-chat
+   supabase secrets set ANTHROPIC_API_KEY=sk-ant-your-real-key-here
+   supabase secrets set MONTHLY_QUESTION_CAP=40    # optional, defaults to 40
+   ```
+3. Done — the app's "Included questions" AI mode now works for any signed-in user, capped at the
+   limit you set, with the Anthropic key never exposed to the client. The "your own API key" mode
+   (Settings → AI Assistant) works with no server setup at all — it calls Anthropic directly from
+   the user's own device.
+
+**Cost note:** the function uses Claude Haiku (cheapest current model) and caps output at 500
+tokens/answer to control cost. Monitor actual spend at console.anthropic.com/settings/billing
+once real users are on it — the cap limits worst-case cost, but real usage patterns can surprise you.
 
 ## Testing the app right now (no Apple/Google account needed)
 
@@ -57,8 +84,8 @@ allow "Install unknown apps" for whichever app you opened it from when prompted.
   2. Add your iOS and/or Android app in the RevenueCat dashboard — this needs the App Store Connect /
      Play Console listing to already exist (see below), so this step comes after those accounts.
   3. Create an entitlement identifier exactly named `premium`, attach it to a monthly and an annual
-     product priced to match S$9.90/mo and S$100.90/yr (or your actual prices), and put them in the
-     "current" offering.
+     product priced to match S$5.90/mo and S$69.90/yr (or your actual prices), each with a 3-day free
+     trial intro phase, and put them in the "current" offering.
   4. In the app itself (or by editing `STATE.settings.revenueCat` directly for a fresh install),
      go to Settings → Monetization and paste in the iOS and Android **public** SDK keys from
      RevenueCat's dashboard (Project Settings → API keys — use the public app keys, never the secret
